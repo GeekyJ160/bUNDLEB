@@ -9,7 +9,7 @@ import {
   Zap, Download, Copy, Trash2, LayoutTemplate, 
   Activity, Sparkles, Code, FileText, Settings, Play,
   FileJson, Palette, File as FileGeneric, Braces, AlignLeft,
-  Bug, AlertTriangle, Check, Info as InfoIcon
+  Bug, AlertTriangle, Check, Info as InfoIcon, FileCode2
 } from 'lucide-react';
 
 const STORAGE_KEY_CODE = 'bundle_blitz_code';
@@ -67,7 +67,7 @@ const constructPreview = (files: FileEntry[]) => {
   if (cssFiles.length) {
     const styles = cssFiles.map(f => f.content).join('\n');
     if (html.includes('</head>')) {
-      html = html.replace('</head>', `<style>\n${styles}\n</style>\n</head>`);
+      html = html.replace('</head>', `<style>\n/* Injected by BundleBlitz */\n${styles}\n</style>\n</head>`);
     } else {
       html = html + `<style>\n${styles}\n</style>`;
     }
@@ -76,7 +76,7 @@ const constructPreview = (files: FileEntry[]) => {
   // Inject JS
   if (jsFiles.length) {
     const scripts = jsFiles.map(f => f.content).join('\n');
-    const scriptTag = `<script type="module">\n${scripts}\n</script>`;
+    const scriptTag = `<script type="module">\n/* Injected by BundleBlitz */\n${scripts}\n</script>`;
     if (html.includes('</body>')) {
       html = html.replace('</body>', `${scriptTag}\n</body>`);
     } else {
@@ -86,6 +86,8 @@ const constructPreview = (files: FileEntry[]) => {
 
   return html;
 };
+
+type BundleType = 'JS' | 'HTML';
 
 const App: React.FC = () => {
   const [files, setFiles] = useState<FileEntry[]>([]);
@@ -102,6 +104,7 @@ const App: React.FC = () => {
   const [isLintLoading, setIsLintLoading] = useState(false);
   const [selectedLintIssue, setSelectedLintIssue] = useState<number | null>(null);
 
+  const [bundleType, setBundleType] = useState<BundleType>('JS');
   const [enableTranspilation, setEnableTranspilation] = useState(false);
   const [enableFormatting, setEnableFormatting] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -151,6 +154,13 @@ const App: React.FC = () => {
       return () => URL.revokeObjectURL(url);
     }
   }, [files, viewMode]);
+
+  // Auto-detect HTML bundle preference
+  useEffect(() => {
+    if (files.some(f => f.name.toLowerCase().endsWith('.html'))) {
+      setBundleType('HTML');
+    }
+  }, [files]);
 
   const handleFilesSelected = async (selectedFiles: File[]) => {
     setIsProcessing(true);
@@ -205,61 +215,63 @@ const App: React.FC = () => {
     await new Promise(resolve => setTimeout(resolve, 100));
 
     try {
-      const header = `/**\n * BundleBlitz ⚡\n * Generated: ${new Date().toISOString()}\n * Files: ${files.length}\n */\n\n`;
-      
-      // Concatenate files
-      // IMPORTANT: Non-script files must be wrapped in comments or strings to keep bundle.js valid JavaScript
-      let content = files.map(f => {
-        const ext = f.name.split('.').pop()?.toLowerCase();
-        const isScript = ['js', 'ts', 'jsx', 'tsx'].includes(ext || '');
-        
-        let fileContent = f.content;
-        
-        if (!isScript) {
-          // Escape closing comments to avoid breaking the block
-          const safeContent = f.content.replace(/\*\//g, '* /');
-          fileContent = `/*\n[Non-Script File: ${f.name}]\n\n${safeContent}\n*/`;
-        }
+      let finalCode = '';
 
-        return `// --- BEGIN ${f.name} (${f.size} bytes) ---\n${fileContent}\n// --- END ${f.name} ---\n`;
-      }).join('\n');
-      
-      let finalCode = header + content;
-
-      // 1. Transpilation (Babel)
-      if (enableTranspilation) {
-        addDiagnostic('Loading Babel for transpilation...', 'info');
-        try {
-          // Dynamic import to prevent app load failure
-          // @ts-ignore
-          const Babel = await import('@babel/standalone');
+      if (bundleType === 'HTML') {
+        // --- HTML BUNDLER ---
+        addDiagnostic('Generating Single-File HTML Bundle...', 'info');
+        finalCode = constructPreview(files);
+        // Prettify HTML if formatting enabled (using simple built-in approach or could assume prettier html parser loaded)
+        // For now, we will apply formatting only if JS bundle or if we added HTML parser to prettier.
+      } else {
+        // --- JS BUNDLER ---
+        const header = `/**\n * BundleBlitz ⚡\n * Generated: ${new Date().toISOString()}\n * Files: ${files.length}\n */\n\n`;
+        
+        let content = files.map(f => {
+          const ext = f.name.split('.').pop()?.toLowerCase();
+          const isScript = ['js', 'ts', 'jsx', 'tsx'].includes(ext || '');
           
-          // Handle different module formats (ESM vs UMD wrapped)
-          const transformFn = Babel.transform || (Babel as any).default?.transform;
-
-          if (transformFn) {
-            const result = transformFn(finalCode, {
-              presets: ['env'],
-              filename: 'bundle.js',
-              retainLines: true,
-            });
-            
-            if (result.code) {
-              finalCode = result.code;
-              addDiagnostic('Transpilation to ES5 successful.', 'info');
-            }
-          } else {
-            throw new Error('Babel transform function not found in loaded module.');
+          let fileContent = f.content;
+          
+          if (!isScript) {
+            const safeContent = f.content.replace(/\*\//g, '* /');
+            fileContent = `/*\n[Non-Script File: ${f.name}]\n\n${safeContent}\n*/`;
           }
-        } catch (babelError: any) {
-          console.error(babelError);
-          // Don't block the bundle, just warn
-          addDiagnostic(`Transpilation skipped: ${babelError.message || 'Syntax Error or Module Error'}`, 'warning');
+
+          return `// --- BEGIN ${f.name} (${f.size} bytes) ---\n${fileContent}\n// --- END ${f.name} ---\n`;
+        }).join('\n');
+        
+        finalCode = header + content;
+
+        // 1. Transpilation (Babel)
+        if (enableTranspilation) {
+          addDiagnostic('Loading Babel for transpilation...', 'info');
+          try {
+            // @ts-ignore
+            const Babel = await import('@babel/standalone');
+            const transformFn = Babel.transform || (Babel as any).default?.transform;
+
+            if (transformFn) {
+              const result = transformFn(finalCode, {
+                presets: ['env'],
+                filename: 'bundle.js',
+                retainLines: true,
+              });
+              
+              if (result.code) {
+                finalCode = result.code;
+                addDiagnostic('Transpilation to ES5 successful.', 'info');
+              }
+            }
+          } catch (babelError: any) {
+            console.error(babelError);
+            addDiagnostic(`Transpilation warning: ${babelError.message}`, 'warning');
+          }
         }
       }
 
-      // 2. Formatting (Prettier)
-      if (enableFormatting) {
+      // 2. Formatting (Prettier) - Only for JS currently unless we add HTML parser
+      if (enableFormatting && bundleType === 'JS') {
         addDiagnostic('Formatting code with Prettier...', 'info');
         try {
           // @ts-ignore
@@ -270,8 +282,6 @@ const App: React.FC = () => {
           const parserEstreeMod = await import('prettier/plugins/estree');
           
           const prettierFormat = prettier.format || (prettier as any).default?.format;
-          
-          // Ensure we get the default export for plugins if necessary (common in ESM CDN builds)
           const parserBabel = parserBabelMod.default || parserBabelMod;
           const parserEstree = parserEstreeMod.default || parserEstreeMod;
 
@@ -284,30 +294,25 @@ const App: React.FC = () => {
               printWidth: 80,
             });
             addDiagnostic('Code formatted successfully.', 'info');
-          } else {
-            throw new Error('Prettier format function not found.');
           }
         } catch (fmtError: any) {
           console.error(fmtError);
-          addDiagnostic(`Formatting failed: ${fmtError.message || 'Unknown error'}`, 'warning');
+          addDiagnostic(`Formatting failed: ${fmtError.message}`, 'warning');
         }
       }
       
       setBundledCode(finalCode);
-      addDiagnostic(`Bundle created successfully! Total size: ${finalCode.length} bytes.`, 'info');
+      addDiagnostic(`Bundle created successfully! Size: ${finalCode.length} bytes.`, 'info');
       setViewMode(ViewMode.EDITOR);
       
-      // Reset AI states when new bundle is created
       setAiAnalysis('');
       setLintIssues([]);
       setSelectedLintIssue(null);
 
-      // Save to LocalStorage
       try {
         localStorage.setItem(STORAGE_KEY_CODE, finalCode);
         localStorage.setItem(STORAGE_KEY_FILES, JSON.stringify(files));
       } catch (e) {
-        console.warn('LocalStorage quota exceeded', e);
         addDiagnostic('Auto-save failed: Storage quota exceeded.', 'warning');
       }
 
@@ -317,20 +322,21 @@ const App: React.FC = () => {
     } finally {
       setIsProcessing(false);
     }
-  }, [files, enableTranspilation, enableFormatting]);
+  }, [files, enableTranspilation, enableFormatting, bundleType]);
 
   const handleDownload = () => {
     if (!bundledCode) return;
-    const blob = new Blob([bundledCode], { type: 'text/javascript' });
+    const isHtml = bundleType === 'HTML';
+    const blob = new Blob([bundledCode], { type: isHtml ? 'text/html' : 'text/javascript' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = 'bundle.js';
+    a.download = isHtml ? 'index.html' : 'bundle.js';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    addDiagnostic('Download started.', 'info');
+    addDiagnostic(`Download started (${a.download}).`, 'info');
   };
 
   const handleCopy = () => {
@@ -417,7 +423,7 @@ const App: React.FC = () => {
               <Zap className="text-neon-cyan fill-current" size={40} />
             </h1>
             <p className="text-gray-400 text-lg max-w-2xl">
-              High-performance single-file bundler. Drag, drop, and deploy.
+              High-performance single-file bundler. Drag a folder to create a static site instantly.
             </p>
           </div>
           
@@ -472,45 +478,75 @@ const App: React.FC = () => {
                   <div className="mb-2 px-1">
                     <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Build Configuration</h4>
                     <div className="space-y-3">
-                      {/* Transpilation Toggle */}
-                      <label className="flex items-center gap-3 cursor-pointer group select-none">
-                        <div className="relative">
-                          <input 
-                            type="checkbox" 
-                            checked={enableTranspilation}
-                            onChange={(e) => setEnableTranspilation(e.target.checked)}
-                            className="sr-only peer" 
-                          />
-                          <div className="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-neon-cyan"></div>
-                        </div>
-                        <span className="text-sm text-gray-300 flex items-center gap-2 group-hover:text-white transition-colors">
-                          <Settings size={16} className="text-neon-cyan" />
-                          <div>
-                            <span className="block font-medium">Transpile to ES5</span>
-                            <span className="block text-xs text-gray-500">Use Babel for compatibility</span>
-                          </div>
-                        </span>
-                      </label>
+                      
+                      {/* Bundle Type Toggle */}
+                      <div className="flex bg-gray-800 rounded-lg p-1 border border-white/10 mb-4">
+                        <button
+                          onClick={() => setBundleType('JS')}
+                          className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-bold transition-all ${bundleType === 'JS' ? 'bg-white/10 text-white shadow' : 'text-gray-400 hover:text-white'}`}
+                        >
+                           <FileCode2 size={14} /> JS Bundle
+                        </button>
+                        <button
+                          onClick={() => setBundleType('HTML')}
+                          className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-bold transition-all ${bundleType === 'HTML' ? 'bg-orange-500/20 text-orange-400 shadow border border-orange-500/30' : 'text-gray-400 hover:text-white'}`}
+                        >
+                           <LayoutTemplate size={14} /> HTML Bundle
+                        </button>
+                      </div>
 
-                      {/* Formatting Toggle */}
-                      <label className="flex items-center gap-3 cursor-pointer group select-none">
-                        <div className="relative">
-                          <input 
-                            type="checkbox" 
-                            checked={enableFormatting}
-                            onChange={(e) => setEnableFormatting(e.target.checked)}
-                            className="sr-only peer" 
-                          />
-                          <div className="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-neon-magenta"></div>
+                      {bundleType === 'JS' && (
+                        <>
+                          {/* Transpilation Toggle */}
+                          <label className="flex items-center gap-3 cursor-pointer group select-none">
+                            <div className="relative">
+                              <input 
+                                type="checkbox" 
+                                checked={enableTranspilation}
+                                onChange={(e) => setEnableTranspilation(e.target.checked)}
+                                className="sr-only peer" 
+                              />
+                              <div className="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-neon-cyan"></div>
+                            </div>
+                            <span className="text-sm text-gray-300 flex items-center gap-2 group-hover:text-white transition-colors">
+                              <Settings size={16} className="text-neon-cyan" />
+                              <div>
+                                <span className="block font-medium">Transpile to ES5</span>
+                                <span className="block text-xs text-gray-500">Use Babel for compatibility</span>
+                              </div>
+                            </span>
+                          </label>
+
+                          {/* Formatting Toggle */}
+                          <label className="flex items-center gap-3 cursor-pointer group select-none">
+                            <div className="relative">
+                              <input 
+                                type="checkbox" 
+                                checked={enableFormatting}
+                                onChange={(e) => setEnableFormatting(e.target.checked)}
+                                className="sr-only peer" 
+                              />
+                              <div className="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-neon-magenta"></div>
+                            </div>
+                            <span className="text-sm text-gray-300 flex items-center gap-2 group-hover:text-white transition-colors">
+                              <AlignLeft size={16} className="text-neon-magenta" />
+                              <div>
+                                <span className="block font-medium">Format Code (Prettier)</span>
+                                <span className="block text-xs text-gray-500">Format JS output</span>
+                              </div>
+                            </span>
+                          </label>
+                        </>
+                      )}
+                      
+                      {bundleType === 'HTML' && (
+                        <div className="p-3 bg-orange-500/5 border border-orange-500/20 rounded-lg">
+                          <p className="text-xs text-orange-300 flex items-start gap-2">
+                            <InfoIcon size={14} className="mt-0.5 shrink-0" />
+                            Generates a single index.html file with all CSS and JS inlined.
+                          </p>
                         </div>
-                        <span className="text-sm text-gray-300 flex items-center gap-2 group-hover:text-white transition-colors">
-                          <AlignLeft size={16} className="text-neon-magenta" />
-                          <div>
-                            <span className="block font-medium">Format Code (Prettier)</span>
-                            <span className="block text-xs text-gray-500">Format using Prettier</span>
-                          </div>
-                        </span>
-                      </label>
+                      )}
                     </div>
                   </div>
                   
@@ -522,7 +558,7 @@ const App: React.FC = () => {
                     className="w-full py-3 rounded-lg bg-gradient-to-r from-neon-cyan to-neon-purple text-dark-bg font-bold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-neon-cyan/20"
                   >
                     {isProcessing ? <Activity className="animate-spin" size={20} /> : <Zap size={20} />}
-                    Bundle Files
+                    {bundleType === 'HTML' ? 'Generate HTML' : 'Bundle Files'}
                   </button>
                   <button
                     onClick={handleClear}
@@ -570,8 +606,8 @@ const App: React.FC = () => {
                 <div className="h-full flex flex-col">
                   <div className="flex justify-between items-center p-4 border-b border-white/10 bg-white/5">
                     <span className="text-gray-400 text-sm font-mono flex items-center gap-2">
-                      bundle.js 
-                      {enableTranspilation && <span className="text-xs bg-neon-cyan/10 text-neon-cyan px-2 py-0.5 rounded border border-neon-cyan/20">ES5</span>}
+                      {bundleType === 'HTML' ? 'index.html' : 'bundle.js'}
+                      {enableTranspilation && bundleType === 'JS' && <span className="text-xs bg-neon-cyan/10 text-neon-cyan px-2 py-0.5 rounded border border-neon-cyan/20">ES5</span>}
                     </span>
                     <div className="flex gap-2">
                       <button 
