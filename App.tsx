@@ -2,6 +2,7 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import { DropZone } from './components/DropZone';
 import { Visualizer } from './components/Visualizer';
 import { DiagnosticPanel } from './components/DiagnosticPanel';
+import { AnnotatedCodeView } from './components/AnnotatedCodeView';
 import { FileEntry, Diagnostic, BundleStats, ViewMode, LintIssue } from './types';
 import { analyzeBundleWithGemini, lintBundleWithGemini } from './services/geminiService';
 import { 
@@ -99,6 +100,7 @@ const App: React.FC = () => {
   const [activeAiTab, setActiveAiTab] = useState<'analysis' | 'lint'>('analysis');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [isLintLoading, setIsLintLoading] = useState(false);
+  const [selectedLintIssue, setSelectedLintIssue] = useState<number | null>(null);
 
   const [enableTranspilation, setEnableTranspilation] = useState(false);
   const [enableFormatting, setEnableFormatting] = useState(false);
@@ -298,6 +300,7 @@ const App: React.FC = () => {
       // Reset AI states when new bundle is created
       setAiAnalysis('');
       setLintIssues([]);
+      setSelectedLintIssue(null);
 
       // Save to LocalStorage
       try {
@@ -343,6 +346,7 @@ const App: React.FC = () => {
     setDiagnostics([]);
     setAiAnalysis('');
     setLintIssues([]);
+    setSelectedLintIssue(null);
     localStorage.removeItem(STORAGE_KEY_CODE);
     localStorage.removeItem(STORAGE_KEY_FILES);
     addDiagnostic('Workspace cleared.', 'info');
@@ -376,6 +380,7 @@ const App: React.FC = () => {
     setViewMode(ViewMode.AI_INSIGHTS);
     setActiveAiTab('lint');
     setIsLintLoading(true);
+    setSelectedLintIssue(null);
     try {
       const issues = await lintBundleWithGemini(bundledCode);
       setLintIssues(issues);
@@ -654,9 +659,9 @@ const App: React.FC = () => {
                         )}
                       </div>
                       
-                      <div className="flex-1 bg-dark-bg/50 rounded-xl border border-white/5 overflow-y-auto custom-scrollbar relative">
+                      <div className="flex-1 bg-dark-bg/50 rounded-xl border border-white/5 overflow-hidden relative">
                         {activeAiTab === 'analysis' ? (
-                          <div className="p-6">
+                          <div className="p-6 h-full overflow-y-auto custom-scrollbar">
                             {isAiLoading ? (
                               <div className="space-y-4 animate-pulse">
                                 <div className="h-4 bg-white/10 rounded w-3/4"></div>
@@ -668,14 +673,14 @@ const App: React.FC = () => {
                                 {aiAnalysis}
                               </div>
                             ) : (
-                              <div className="flex flex-col items-center justify-center h-[300px] text-gray-500 italic text-center">
+                              <div className="flex flex-col items-center justify-center h-full text-gray-500 italic text-center">
                                 <Sparkles size={40} className="mb-4 opacity-20" />
                                 <p>Click "Run Analysis" to get a deep architectural review <br/> and security assessment.</p>
                               </div>
                             )}
                           </div>
                         ) : (
-                          <div className="p-0">
+                          <div className="h-full flex flex-col">
                              {isLintLoading ? (
                               <div className="p-6 space-y-4 animate-pulse">
                                 <div className="h-10 bg-white/10 rounded w-full"></div>
@@ -683,48 +688,66 @@ const App: React.FC = () => {
                                 <div className="h-10 bg-white/10 rounded w-full"></div>
                               </div>
                             ) : lintIssues.length > 0 ? (
-                              <div className="w-full">
-                                <table className="w-full text-left text-sm text-gray-400">
-                                  <thead className="bg-white/5 text-gray-200 sticky top-0 backdrop-blur-sm z-10">
-                                    <tr>
-                                      <th className="p-4 font-semibold w-24">Severity</th>
-                                      <th className="p-4 font-semibold w-20">Line</th>
-                                      <th className="p-4 font-semibold">Message</th>
-                                      <th className="p-4 font-semibold">Suggestion</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-white/5">
-                                    {lintIssues.map((issue, idx) => (
-                                      <tr key={idx} className="hover:bg-white/5 transition-colors">
-                                        <td className="p-4">
-                                          {issue.severity === 'error' ? (
-                                            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-red-500/10 text-red-400 border border-red-500/20 text-xs font-bold uppercase">
-                                              <AlertTriangle size={12} /> Error
-                                            </span>
-                                          ) : issue.severity === 'warning' ? (
-                                            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-yellow-500/10 text-yellow-400 border border-yellow-500/20 text-xs font-bold uppercase">
-                                              <AlertTriangle size={12} /> Warn
-                                            </span>
-                                          ) : (
-                                            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 text-xs font-bold uppercase">
-                                              <InfoIcon size={12} /> Info
-                                            </span>
-                                          )}
-                                        </td>
-                                        <td className="p-4 font-mono text-gray-500">{issue.line || '-'}</td>
-                                        <td className="p-4 text-gray-300">{issue.message}</td>
-                                        <td className="p-4 text-neon-cyan/80 italic">{issue.suggestion}</td>
+                              <div className="flex h-full">
+                                {/* Left Pane: Issue List */}
+                                <div className="w-1/3 border-r border-white/10 overflow-y-auto custom-scrollbar bg-dark-card/50">
+                                  <table className="w-full text-left text-sm text-gray-400">
+                                    <thead className="bg-white/5 text-gray-200 sticky top-0 backdrop-blur-sm z-10">
+                                      <tr>
+                                        <th className="p-3 font-semibold text-xs uppercase">Issues ({lintIssues.length})</th>
                                       </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
+                                    </thead>
+                                    <tbody className="divide-y divide-white/5">
+                                      {lintIssues.map((issue, idx) => (
+                                        <tr 
+                                          key={idx} 
+                                          onClick={() => setSelectedLintIssue(idx)}
+                                          className={`cursor-pointer transition-colors ${selectedLintIssue === idx ? 'bg-white/10' : 'hover:bg-white/5'}`}
+                                        >
+                                          <td className="p-3">
+                                            <div className="flex items-center justify-between mb-1">
+                                              {issue.severity === 'error' ? (
+                                                <span className="inline-flex items-center gap-1 text-red-400 text-xs font-bold uppercase">
+                                                  <AlertTriangle size={10} /> Error
+                                                </span>
+                                              ) : issue.severity === 'warning' ? (
+                                                <span className="inline-flex items-center gap-1 text-yellow-400 text-xs font-bold uppercase">
+                                                  <AlertTriangle size={10} /> Warn
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 text-blue-400 text-xs font-bold uppercase">
+                                                  <InfoIcon size={10} /> Info
+                                                </span>
+                                              )}
+                                              <span className="font-mono text-xs text-gray-600">L{issue.line || '?'}</span>
+                                            </div>
+                                            <div className="text-gray-300 line-clamp-2 text-xs mb-1">{issue.message}</div>
+                                            {issue.suggestion && (
+                                              <div className="text-neon-cyan/60 italic text-[10px] line-clamp-1">Tip: {issue.suggestion}</div>
+                                            )}
+                                          </td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                                {/* Right Pane: Annotated Code View */}
+                                <div className="flex-1 h-full overflow-hidden bg-[#1d1f21] relative">
+                                  <AnnotatedCodeView 
+                                    code={bundledCode} 
+                                    issues={lintIssues} 
+                                    selectedIssueIndex={selectedLintIssue} 
+                                  />
+                                </div>
                               </div>
                             ) : (
-                              <div className="flex flex-col items-center justify-center h-[300px] text-gray-500 italic text-center p-6">
+                              <div className="flex flex-col items-center justify-center h-full text-gray-500 italic text-center p-6">
                                 <Bug size={40} className="mb-4 opacity-20" />
                                 <p>Click "Run Linter" to check for syntax errors, <br/> bugs, and bad practices.</p>
                                 {lintIssues.length === 0 && !isLintLoading && activeAiTab === 'lint' && (
-                                  <p className="mt-2 text-green-500/50 text-xs">(If you already ran it, no issues were found!)</p>
+                                  <p className="mt-2 text-green-500/50 text-xs font-bold flex items-center gap-1 justify-center">
+                                    <Check size={14} /> No issues found! Clean code.
+                                  </p>
                                 )}
                               </div>
                             )}
