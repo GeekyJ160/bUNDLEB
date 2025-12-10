@@ -17,12 +17,21 @@ export const AnnotatedCodeView: React.FC<AnnotatedCodeViewProps> = ({ code, issu
     const loadPrism = async () => {
       try {
         // @ts-ignore
-        const Prism = await import('prismjs');
-        // Simple language load if needed, basic JS usually included in core or mapped
-        // For ESM CDN, languages often need specific imports, but let's try basic highlighting first
+        const PrismModule = await import('prismjs');
+        // Handle both default export and namespace export
+        // @ts-ignore
+        const Prism = PrismModule.default || PrismModule;
+
         if (mounted) {
-          const html = Prism.highlight(code, Prism.languages.javascript || Prism.languages.clike, 'javascript');
-          setHighlightedHtml(html);
+          // Safety check: ensure languages definition exists
+          const grammar = Prism.languages?.javascript || Prism.languages?.clike;
+          if (grammar) {
+            const html = Prism.highlight(code, grammar, 'javascript');
+            setHighlightedHtml(html);
+          } else {
+            // Fallback if grammar not loaded
+             setHighlightedHtml(code.replace(/</g, '&lt;').replace(/>/g, '&gt;'));
+          }
         }
       } catch (e) {
         console.warn('Prism failed to load, falling back to plain text', e);

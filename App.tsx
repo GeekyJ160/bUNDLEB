@@ -1,19 +1,22 @@
 import React, { useState, useCallback, useEffect, useMemo } from 'react';
+import { HashRouter, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
 import { DropZone } from './components/DropZone';
 import { Visualizer } from './components/Visualizer';
 import { DiagnosticPanel } from './components/DiagnosticPanel';
 import { AnnotatedCodeView } from './components/AnnotatedCodeView';
-import { FileEntry, Diagnostic, BundleStats, ViewMode, LintIssue } from './types';
+import { FileEntry, Diagnostic, BundleStats, LintIssue } from './types';
 import { analyzeBundleWithGemini, lintBundleWithGemini } from './services/geminiService';
 import { 
   Zap, Download, Copy, Trash2, LayoutTemplate, 
   Activity, Sparkles, Code, FileText, Settings, Play,
   FileJson, Palette, File as FileGeneric, Braces, AlignLeft,
-  Bug, AlertTriangle, Check, Info as InfoIcon, FileCode2
+  Bug, AlertTriangle, Check, Info as InfoIcon, FileCode2,
+  Globe, Paintbrush
 } from 'lucide-react';
 
 const STORAGE_KEY_CODE = 'bundle_blitz_code';
 const STORAGE_KEY_FILES = 'bundle_blitz_files';
+const STORAGE_KEY_SETTINGS = 'bundle_blitz_settings';
 
 const getFileTypeInfo = (fileName: string) => {
   const ext = fileName.split('.').pop()?.toLowerCase();
@@ -22,22 +25,26 @@ const getFileTypeInfo = (fileName: string) => {
     case 'jsx':
     case 'ts':
     case 'tsx':
-      return { Icon: Code, color: 'text-yellow-400', label: 'Script' };
+    case 'mjs':
+      return { Icon: FileCode2, color: 'text-yellow-400', bg: 'bg-yellow-400/10', label: 'JavaScript' };
     case 'css':
     case 'scss':
     case 'less':
-      return { Icon: Palette, color: 'text-blue-400', label: 'Style' };
+    case 'sass':
+      return { Icon: Paintbrush, color: 'text-blue-400', bg: 'bg-blue-400/10', label: 'Style' };
     case 'html':
     case 'htm':
-      return { Icon: LayoutTemplate, color: 'text-orange-400', label: 'Layout' };
+      return { Icon: Globe, color: 'text-orange-400', bg: 'bg-orange-400/10', label: 'HTML' };
     case 'json':
-      return { Icon: FileJson, color: 'text-green-400', label: 'Data' };
-    case 'txt':
+      return { Icon: FileJson, color: 'text-emerald-400', bg: 'bg-emerald-400/10', label: 'JSON Data' };
     case 'md':
+      return { Icon: FileText, color: 'text-pink-400', bg: 'bg-pink-400/10', label: 'Markdown' };
+    case 'txt':
+      return { Icon: AlignLeft, color: 'text-gray-400', bg: 'bg-gray-400/10', label: 'Plain Text' };
     case 'csv':
-      return { Icon: FileText, color: 'text-gray-300', label: 'Text' };
+      return { Icon: FileText, color: 'text-green-300', bg: 'bg-green-300/10', label: 'CSV Data' };
     default:
-      return { Icon: FileGeneric, color: 'text-gray-500', label: 'File' };
+      return { Icon: FileGeneric, color: 'text-gray-500', bg: 'bg-gray-500/10', label: ext?.toUpperCase() || 'FILE' };
   }
 };
 
@@ -76,7 +83,9 @@ const constructPreview = (files: FileEntry[]) => {
   // Inject JS
   if (jsFiles.length) {
     const scripts = jsFiles.map(f => f.content).join('\n');
-    const scriptTag = `<script type="module">\n/* Injected by BundleBlitz */\n${scripts}\n</script>`;
+    // Escape closing script tags to prevent breaking the HTML
+    const safeScripts = scripts.replace(/<\/script>/g, '<\\/script>');
+    const scriptTag = `<script type="module">\n/* Injected by BundleBlitz */\n${safeScripts}\n</script>`;
     if (html.includes('</body>')) {
       html = html.replace('</body>', `${scriptTag}\n</body>`);
     } else {
@@ -89,15 +98,16 @@ const constructPreview = (files: FileEntry[]) => {
 
 type BundleType = 'JS' | 'HTML';
 
-const App: React.FC = () => {
+const BundleBlitz: React.FC = () => {
+  const location = useLocation();
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [bundledCode, setBundledCode] = useState<string>('');
-  const [viewMode, setViewMode] = useState<ViewMode>(ViewMode.EDITOR);
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   
   // AI State
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
+  const [renderedAnalysis, setRenderedAnalysis] = useState<string>('');
   const [lintIssues, setLintIssues] = useState<LintIssue[]>([]);
   const [activeAiTab, setActiveAiTab] = useState<'analysis' | 'lint'>('analysis');
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -122,6 +132,8 @@ const App: React.FC = () => {
   useEffect(() => {
     const savedCode = localStorage.getItem(STORAGE_KEY_CODE);
     const savedFiles = localStorage.getItem(STORAGE_KEY_FILES);
+    const savedSettings = localStorage.getItem(STORAGE_KEY_SETTINGS);
+    
     let restoredCount = 0;
 
     if (savedFiles) {
@@ -138,13 +150,37 @@ const App: React.FC = () => {
 
     if (savedCode) {
       setBundledCode(savedCode);
+    }
+    
+    if (savedSettings) {
+      try {
+        const parsedSettings = JSON.parse(savedSettings);
+        if (parsedSettings.bundleType) setBundleType(parsedSettings.bundleType);
+        if (parsedSettings.enableTranspilation !== undefined) setEnableTranspilation(parsedSettings.enableTranspilation);
+        if (parsedSettings.enableFormatting !== undefined) setEnableFormatting(parsedSettings.enableFormatting);
+      } catch (e) {
+        console.error('Failed to parse saved settings', e);
+      }
+    }
+
+    if (restoredCount > 0 || savedCode) {
       addDiagnostic(`Restored previous session: ${restoredCount} files and bundled output loaded.`, 'info');
     }
   }, []);
 
+  // Save settings whenever they change
+  useEffect(() => {
+    const settings = {
+      bundleType,
+      enableTranspilation,
+      enableFormatting
+    };
+    localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
+  }, [bundleType, enableTranspilation, enableFormatting]);
+
   // Update preview URL when switching to preview tab or files change
   useEffect(() => {
-    if (viewMode === ViewMode.PREVIEW) {
+    if (location.pathname === '/preview') {
       const html = constructPreview(files);
       const blob = new Blob([html], { type: 'text/html' });
       const url = URL.createObjectURL(blob);
@@ -153,32 +189,63 @@ const App: React.FC = () => {
       // Cleanup
       return () => URL.revokeObjectURL(url);
     }
-  }, [files, viewMode]);
+  }, [files, location.pathname]);
 
-  // Auto-detect HTML bundle preference
+  // Render Markdown for AI Analysis
   useEffect(() => {
-    if (files.some(f => f.name.toLowerCase().endsWith('.html'))) {
-      setBundleType('HTML');
-    }
-  }, [files]);
+    if (!aiAnalysis) return;
+    const renderMarkdown = async () => {
+      try {
+        // @ts-ignore
+        const markedMod = await import('marked');
+        const parse = markedMod.parse || markedMod.marked?.parse || markedMod.default?.parse;
+        if (parse) {
+          const html = await parse(aiAnalysis);
+          setRenderedAnalysis(html);
+        } else {
+          setRenderedAnalysis(aiAnalysis); // Fallback
+        }
+      } catch (e) {
+        console.error('Failed to load marked', e);
+        setRenderedAnalysis(aiAnalysis);
+      }
+    };
+    renderMarkdown();
+  }, [aiAnalysis]);
 
   const handleFilesSelected = async (selectedFiles: File[]) => {
     setIsProcessing(true);
     const newFileEntries: FileEntry[] = [];
+    let hasHtml = false;
     
     try {
       for (const file of selectedFiles) {
         const text = await file.text();
         const ext = file.name.split('.').pop()?.toLowerCase();
 
-        // Type specific checks
+        // Type specific checks & diagnostics
         if (ext === 'json') {
           try {
             JSON.parse(text);
-            // addDiagnostic(`Validated JSON: ${file.name}`, 'info');
           } catch (e) {
-            addDiagnostic(`Invalid JSON format detected in ${file.name}`, 'warning');
+            addDiagnostic(`Invalid JSON syntax in ${file.name}`, 'error');
           }
+        } else if (ext === 'md') {
+          if (text.trim().length === 0) {
+            addDiagnostic(`Markdown file ${file.name} is empty`, 'warning');
+          } else if (!text.includes('#')) {
+            addDiagnostic(`Markdown file ${file.name} missing headers (#) - consider structuring content`, 'info');
+          }
+        } else if (ext === 'txt') {
+          if (text.trim().length === 0) {
+             addDiagnostic(`Text file ${file.name} is empty`, 'warning');
+          }
+        } else if (ext === 'html' || ext === 'htm') {
+           hasHtml = true;
+        } else if (['css', 'scss', 'less'].includes(ext || '')) {
+           if (text.includes('@import')) {
+             addDiagnostic(`Performance warning: @import found in ${file.name}`, 'warning');
+           }
         } else if (['js', 'ts', 'jsx', 'tsx'].includes(ext || '')) {
           if (text.includes('eval(')) {
             addDiagnostic(`Security Warning: 'eval' usage detected in ${file.name}`, 'warning');
@@ -195,6 +262,13 @@ const App: React.FC = () => {
       }
       
       setFiles(prev => [...prev, ...newFileEntries]);
+      
+      // Auto-switch to HTML mode if user drops an HTML file
+      if (hasHtml) {
+        setBundleType('HTML');
+        addDiagnostic('HTML file detected. Switched to HTML Bundle mode.', 'info');
+      }
+
       addDiagnostic(`Successfully loaded ${selectedFiles.length} file(s).`, 'info');
     } catch (err) {
       addDiagnostic('Failed to read one or more files.', 'error');
@@ -221,8 +295,6 @@ const App: React.FC = () => {
         // --- HTML BUNDLER ---
         addDiagnostic('Generating Single-File HTML Bundle...', 'info');
         finalCode = constructPreview(files);
-        // Prettify HTML if formatting enabled (using simple built-in approach or could assume prettier html parser loaded)
-        // For now, we will apply formatting only if JS bundle or if we added HTML parser to prettier.
       } else {
         // --- JS BUNDLER ---
         const header = `/**\n * BundleBlitz ⚡\n * Generated: ${new Date().toISOString()}\n * Files: ${files.length}\n */\n\n`;
@@ -270,7 +342,7 @@ const App: React.FC = () => {
         }
       }
 
-      // 2. Formatting (Prettier) - Only for JS currently unless we add HTML parser
+      // 2. Formatting (Prettier) - Only for JS currently
       if (enableFormatting && bundleType === 'JS') {
         addDiagnostic('Formatting code with Prettier...', 'info');
         try {
@@ -303,9 +375,10 @@ const App: React.FC = () => {
       
       setBundledCode(finalCode);
       addDiagnostic(`Bundle created successfully! Size: ${finalCode.length} bytes.`, 'info');
-      setViewMode(ViewMode.EDITOR);
       
+      // Clear previous analysis when re-bundling
       setAiAnalysis('');
+      setRenderedAnalysis('');
       setLintIssues([]);
       setSelectedLintIssue(null);
 
@@ -351,10 +424,12 @@ const App: React.FC = () => {
     setBundledCode('');
     setDiagnostics([]);
     setAiAnalysis('');
+    setRenderedAnalysis('');
     setLintIssues([]);
     setSelectedLintIssue(null);
     localStorage.removeItem(STORAGE_KEY_CODE);
     localStorage.removeItem(STORAGE_KEY_FILES);
+    localStorage.removeItem(STORAGE_KEY_SETTINGS);
     addDiagnostic('Workspace cleared.', 'info');
   };
 
@@ -363,7 +438,6 @@ const App: React.FC = () => {
       addDiagnostic('Please bundle files before running AI analysis.', 'warning');
       return;
     }
-    setViewMode(ViewMode.AI_INSIGHTS);
     setActiveAiTab('analysis');
     setIsAiLoading(true);
     try {
@@ -383,7 +457,6 @@ const App: React.FC = () => {
       addDiagnostic('Please bundle files before running AI Linter.', 'warning');
       return;
     }
-    setViewMode(ViewMode.AI_INSIGHTS);
     setActiveAiTab('lint');
     setIsLintLoading(true);
     setSelectedLintIssue(null);
@@ -403,6 +476,8 @@ const App: React.FC = () => {
     totalSize: files.reduce((acc, f) => acc + f.size, 0),
     linesOfCode: bundledCode.split('\n').length
   };
+
+  const activePath = location.pathname;
 
   return (
     <div className="min-h-screen pb-20 relative overflow-hidden">
@@ -457,14 +532,16 @@ const App: React.FC = () => {
                 </div>
                 <div className="max-h-60 overflow-y-auto custom-scrollbar">
                   {files.map((f, i) => {
-                    const { Icon, color, label } = getFileTypeInfo(f.name);
+                    const { Icon, color, bg, label } = getFileTypeInfo(f.name);
                     return (
                       <div key={f.id} className="px-4 py-3 border-b border-white/5 flex justify-between items-center hover:bg-white/5 transition-colors group">
                         <div className="flex items-center gap-3 overflow-hidden">
-                          <Icon size={16} className={`${color} shrink-0`} />
+                          <div className={`p-2 rounded-lg ${bg} ${color} shrink-0`}>
+                            <Icon size={18} />
+                          </div>
                           <div className="flex flex-col min-w-0">
-                             <span className="text-sm text-gray-300 truncate group-hover:text-white transition-colors">{f.name}</span>
-                             <span className="text-xs text-gray-600 font-mono uppercase">{label}</span>
+                             <span className="text-sm text-gray-200 font-medium truncate group-hover:text-white transition-colors">{f.name}</span>
+                             <span className="text-[10px] text-gray-500 font-mono uppercase tracking-wider">{label}</span>
                           </div>
                         </div>
                         <span className="text-xs text-gray-500 font-mono shrink-0">{(f.size / 1024).toFixed(1)}KB</span>
@@ -579,244 +656,264 @@ const App: React.FC = () => {
             {/* Tabs */}
             <div className="flex items-center gap-2 p-1 bg-dark-card border border-white/10 rounded-xl w-fit">
               {[
-                { id: ViewMode.EDITOR, label: 'Code Editor', icon: Code },
-                { id: ViewMode.VISUALIZER, label: 'Visualizer', icon: LayoutTemplate },
-                { id: ViewMode.AI_INSIGHTS, label: 'AI Insights', icon: Sparkles },
-                { id: ViewMode.PREVIEW, label: 'Live Preview', icon: Play },
-              ].map(mode => (
-                <button
-                  key={mode.id}
-                  onClick={() => setViewMode(mode.id)}
+                { path: '/editor', label: 'Code Editor', icon: Code },
+                { path: '/visualizer', label: 'Visualizer', icon: LayoutTemplate },
+                { path: '/ai-insights', label: 'AI Insights', icon: Sparkles },
+                { path: '/preview', label: 'Live Preview', icon: Play },
+              ].map(tab => (
+                <Link
+                  key={tab.path}
+                  to={tab.path}
                   className={`
                     flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
-                    ${viewMode === mode.id 
+                    ${activePath === tab.path 
                       ? 'bg-white/10 text-neon-cyan shadow-sm' 
                       : 'text-gray-400 hover:text-white hover:bg-white/5'}
                   `}
                 >
-                  <mode.icon size={16} />
-                  {mode.label}
-                </button>
+                  <tab.icon size={16} />
+                  {tab.label}
+                </Link>
               ))}
             </div>
 
             {/* Content Area */}
             <div className="flex-1 min-h-[500px] bg-dark-card border border-white/10 rounded-xl overflow-hidden relative shadow-2xl">
-              {viewMode === ViewMode.EDITOR && (
-                <div className="h-full flex flex-col">
-                  <div className="flex justify-between items-center p-4 border-b border-white/10 bg-white/5">
-                    <span className="text-gray-400 text-sm font-mono flex items-center gap-2">
-                      {bundleType === 'HTML' ? 'index.html' : 'bundle.js'}
-                      {enableTranspilation && bundleType === 'JS' && <span className="text-xs bg-neon-cyan/10 text-neon-cyan px-2 py-0.5 rounded border border-neon-cyan/20">ES5</span>}
-                    </span>
-                    <div className="flex gap-2">
-                      <button 
-                        onClick={handleCopy}
-                        disabled={!bundledCode}
-                        className="p-2 hover:bg-white/10 rounded-lg text-gray-400 hover:text-neon-cyan transition-colors disabled:opacity-50"
-                        title="Copy Code"
-                      >
-                        <Copy size={18} />
-                      </button>
-                      <button 
-                        onClick={handleDownload}
-                        disabled={!bundledCode}
-                        className="p-2 hover:bg-white/10 rounded-lg text-gray-400 hover:text-neon-cyan transition-colors disabled:opacity-50"
-                        title="Download Bundle"
-                      >
-                        <Download size={18} />
-                      </button>
+              <Routes>
+                <Route path="/" element={<Navigate to="/editor" replace />} />
+                
+                {/* Editor View */}
+                <Route path="/editor" element={
+                  <div className="h-full flex flex-col">
+                    <div className="flex justify-between items-center p-4 border-b border-white/10 bg-white/5">
+                      <span className="text-gray-400 text-sm font-mono flex items-center gap-2">
+                        {bundleType === 'HTML' ? 'index.html' : 'bundle.js'}
+                        {enableTranspilation && bundleType === 'JS' && <span className="text-xs bg-neon-cyan/10 text-neon-cyan px-2 py-0.5 rounded border border-neon-cyan/20">ES5</span>}
+                        {enableFormatting && bundleType === 'JS' && <span className="text-xs bg-neon-magenta/10 text-neon-magenta px-2 py-0.5 rounded border border-neon-magenta/20">Prettier</span>}
+                      </span>
+                      <div className="flex gap-2">
+                        <button 
+                          onClick={handleCopy}
+                          disabled={!bundledCode}
+                          className="p-2 hover:bg-white/10 rounded-lg text-gray-400 hover:text-neon-cyan transition-colors disabled:opacity-50"
+                          title="Copy Code"
+                        >
+                          <Copy size={18} />
+                        </button>
+                        <button 
+                          onClick={handleDownload}
+                          disabled={!bundledCode}
+                          className="p-2 hover:bg-white/10 rounded-lg text-gray-400 hover:text-neon-cyan transition-colors disabled:opacity-50"
+                          title="Download Bundle"
+                        >
+                          <Download size={18} />
+                        </button>
+                      </div>
                     </div>
+                    <textarea 
+                      value={bundledCode} 
+                      readOnly 
+                      placeholder="// Bundled code will appear here..."
+                      className="flex-1 w-full bg-dark-bg p-4 font-mono text-sm text-gray-300 focus:outline-none resize-none"
+                    />
                   </div>
-                  <textarea 
-                    value={bundledCode} 
-                    readOnly 
-                    placeholder="// Bundled code will appear here..."
-                    className="flex-1 w-full bg-dark-bg p-4 font-mono text-sm text-gray-300 focus:outline-none resize-none"
-                  />
-                </div>
-              )}
+                } />
 
-              {viewMode === ViewMode.VISUALIZER && (
-                <div className="h-full p-6 overflow-y-auto">
-                  <Visualizer files={files} />
-                </div>
-              )}
+                {/* Visualizer View */}
+                <Route path="/visualizer" element={
+                  <div className="h-full p-6 overflow-y-auto">
+                    <Visualizer files={files} />
+                  </div>
+                } />
 
-              {viewMode === ViewMode.AI_INSIGHTS && (
-                <div className="h-full p-6 flex flex-col">
-                  {!bundledCode ? (
-                    <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-4">
-                       <Code size={48} className="opacity-20" />
-                       <p>Bundle your files first to enable AI analysis.</p>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="flex justify-between items-center mb-6">
-                        <div className="flex items-center gap-4">
-                           <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                             <Sparkles size={20} className="text-neon-purple" />
-                             AI Insights
-                           </h3>
-                           <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
-                              <button
-                                onClick={() => setActiveAiTab('analysis')}
-                                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${activeAiTab === 'analysis' ? 'bg-neon-purple text-white shadow' : 'text-gray-400 hover:text-white'}`}
-                              >
-                                Deep Analysis
-                              </button>
-                              <button
-                                onClick={() => setActiveAiTab('lint')}
-                                className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${activeAiTab === 'lint' ? 'bg-neon-cyan text-dark-bg shadow' : 'text-gray-400 hover:text-white'}`}
-                              >
-                                Smart Linter
-                              </button>
-                           </div>
+                {/* AI Insights View */}
+                <Route path="/ai-insights" element={
+                  <div className="h-full p-6 flex flex-col">
+                    {!bundledCode ? (
+                      <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-4">
+                         <Code size={48} className="opacity-20" />
+                         <p>Bundle your files first to enable AI analysis.</p>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex justify-between items-center mb-6">
+                          <div className="flex items-center gap-4">
+                             <h3 className="text-xl font-bold text-white flex items-center gap-2">
+                               <Sparkles size={20} className="text-neon-purple" />
+                               AI Insights
+                             </h3>
+                             <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
+                                <button
+                                  onClick={() => setActiveAiTab('analysis')}
+                                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${activeAiTab === 'analysis' ? 'bg-neon-purple text-white shadow' : 'text-gray-400 hover:text-white'}`}
+                                >
+                                  Deep Analysis
+                                </button>
+                                <button
+                                  onClick={() => setActiveAiTab('lint')}
+                                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${activeAiTab === 'lint' ? 'bg-neon-cyan text-dark-bg shadow' : 'text-gray-400 hover:text-white'}`}
+                                >
+                                  Smart Linter
+                                </button>
+                             </div>
+                          </div>
+                          
+                          {activeAiTab === 'analysis' ? (
+                            <button
+                              onClick={handleAiAnalyze}
+                              disabled={isAiLoading}
+                              className="px-4 py-2 bg-neon-purple/20 text-neon-purple border border-neon-purple/50 rounded-lg hover:bg-neon-purple/30 transition-all flex items-center gap-2 text-sm font-bold"
+                            >
+                              {isAiLoading ? <Activity className="animate-spin" size={16} /> : <Sparkles size={16} />}
+                              {aiAnalysis ? 'Re-Analyze' : 'Run Analysis'}
+                            </button>
+                          ) : (
+                            <button
+                              onClick={handleAiLint}
+                              disabled={isLintLoading}
+                              className="px-4 py-2 bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/50 rounded-lg hover:bg-neon-cyan/30 transition-all flex items-center gap-2 text-sm font-bold"
+                            >
+                              {isLintLoading ? <Activity className="animate-spin" size={16} /> : <Bug size={16} />}
+                              {lintIssues.length > 0 ? 'Re-Lint' : 'Run Linter'}
+                            </button>
+                          )}
                         </div>
                         
-                        {activeAiTab === 'analysis' ? (
-                          <button
-                            onClick={handleAiAnalyze}
-                            disabled={isAiLoading}
-                            className="px-4 py-2 bg-neon-purple/20 text-neon-purple border border-neon-purple/50 rounded-lg hover:bg-neon-purple/30 transition-all flex items-center gap-2 text-sm font-bold"
-                          >
-                            {isAiLoading ? <Activity className="animate-spin" size={16} /> : <Sparkles size={16} />}
-                            {aiAnalysis ? 'Re-Analyze' : 'Run Analysis'}
-                          </button>
-                        ) : (
-                          <button
-                            onClick={handleAiLint}
-                            disabled={isLintLoading}
-                            className="px-4 py-2 bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/50 rounded-lg hover:bg-neon-cyan/30 transition-all flex items-center gap-2 text-sm font-bold"
-                          >
-                            {isLintLoading ? <Activity className="animate-spin" size={16} /> : <Bug size={16} />}
-                            {lintIssues.length > 0 ? 'Re-Lint' : 'Run Linter'}
-                          </button>
-                        )}
-                      </div>
-                      
-                      <div className="flex-1 bg-dark-bg/50 rounded-xl border border-white/5 overflow-hidden relative">
-                        {activeAiTab === 'analysis' ? (
-                          <div className="p-6 h-full overflow-y-auto custom-scrollbar">
-                            {isAiLoading ? (
-                              <div className="space-y-4 animate-pulse">
-                                <div className="h-4 bg-white/10 rounded w-3/4"></div>
-                                <div className="h-4 bg-white/10 rounded w-1/2"></div>
-                                <div className="h-4 bg-white/10 rounded w-5/6"></div>
-                              </div>
-                            ) : aiAnalysis ? (
-                              <div className="whitespace-pre-wrap font-sans text-gray-300 leading-relaxed">
-                                {aiAnalysis}
-                              </div>
-                            ) : (
-                              <div className="flex flex-col items-center justify-center h-full text-gray-500 italic text-center">
-                                <Sparkles size={40} className="mb-4 opacity-20" />
-                                <p>Click "Run Analysis" to get a deep architectural review <br/> and security assessment.</p>
-                              </div>
-                            )}
-                          </div>
-                        ) : (
-                          <div className="h-full flex flex-col">
-                             {isLintLoading ? (
-                              <div className="p-6 space-y-4 animate-pulse">
-                                <div className="h-10 bg-white/10 rounded w-full"></div>
-                                <div className="h-10 bg-white/10 rounded w-full"></div>
-                                <div className="h-10 bg-white/10 rounded w-full"></div>
-                              </div>
-                            ) : lintIssues.length > 0 ? (
-                              <div className="flex h-full">
-                                {/* Left Pane: Issue List */}
-                                <div className="w-1/3 border-r border-white/10 overflow-y-auto custom-scrollbar bg-dark-card/50">
-                                  <table className="w-full text-left text-sm text-gray-400">
-                                    <thead className="bg-white/5 text-gray-200 sticky top-0 backdrop-blur-sm z-10">
-                                      <tr>
-                                        <th className="p-3 font-semibold text-xs uppercase">Issues ({lintIssues.length})</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-white/5">
-                                      {lintIssues.map((issue, idx) => (
-                                        <tr 
-                                          key={idx} 
-                                          onClick={() => setSelectedLintIssue(idx)}
-                                          className={`cursor-pointer transition-colors ${selectedLintIssue === idx ? 'bg-white/10' : 'hover:bg-white/5'}`}
-                                        >
-                                          <td className="p-3">
-                                            <div className="flex items-center justify-between mb-1">
-                                              {issue.severity === 'error' ? (
-                                                <span className="inline-flex items-center gap-1 text-red-400 text-xs font-bold uppercase">
-                                                  <AlertTriangle size={10} /> Error
-                                                </span>
-                                              ) : issue.severity === 'warning' ? (
-                                                <span className="inline-flex items-center gap-1 text-yellow-400 text-xs font-bold uppercase">
-                                                  <AlertTriangle size={10} /> Warn
-                                                </span>
-                                              ) : (
-                                                <span className="inline-flex items-center gap-1 text-blue-400 text-xs font-bold uppercase">
-                                                  <InfoIcon size={10} /> Info
-                                                </span>
-                                              )}
-                                              <span className="font-mono text-xs text-gray-600">L{issue.line || '?'}</span>
-                                            </div>
-                                            <div className="text-gray-300 line-clamp-2 text-xs mb-1">{issue.message}</div>
-                                            {issue.suggestion && (
-                                              <div className="text-neon-cyan/60 italic text-[10px] line-clamp-1">Tip: {issue.suggestion}</div>
-                                            )}
-                                          </td>
+                        <div className="flex-1 bg-dark-bg/50 rounded-xl border border-white/5 overflow-hidden relative">
+                          {activeAiTab === 'analysis' ? (
+                            <div className="p-6 h-full overflow-y-auto custom-scrollbar">
+                              {isAiLoading ? (
+                                <div className="space-y-4 animate-pulse">
+                                  <div className="h-4 bg-white/10 rounded w-3/4"></div>
+                                  <div className="h-4 bg-white/10 rounded w-1/2"></div>
+                                  <div className="h-4 bg-white/10 rounded w-5/6"></div>
+                                  <div className="text-center pt-8 text-gray-500 text-sm animate-pulse">Analyzing bundle with Gemini...</div>
+                                </div>
+                              ) : aiAnalysis ? (
+                                <div 
+                                  className="prose prose-invert prose-sm max-w-none font-sans text-gray-300 leading-relaxed"
+                                  dangerouslySetInnerHTML={{ __html: renderedAnalysis }}
+                                />
+                              ) : (
+                                <div className="flex flex-col items-center justify-center h-full text-gray-500 italic text-center">
+                                  <Sparkles size={40} className="mb-4 opacity-20" />
+                                  <p>Click "Run Analysis" to get a deep architectural review <br/> and security assessment.</p>
+                                </div>
+                              )}
+                            </div>
+                          ) : (
+                            <div className="h-full flex flex-col">
+                               {isLintLoading ? (
+                                <div className="p-6 space-y-4 animate-pulse">
+                                  <div className="h-10 bg-white/10 rounded w-full"></div>
+                                  <div className="h-10 bg-white/10 rounded w-full"></div>
+                                  <div className="h-10 bg-white/10 rounded w-full"></div>
+                                  <div className="text-center pt-8 text-gray-500 text-sm animate-pulse">Linting code with Gemini...</div>
+                                </div>
+                              ) : lintIssues.length > 0 ? (
+                                <div className="flex h-full">
+                                  {/* Left Pane: Issue List */}
+                                  <div className="w-1/3 border-r border-white/10 overflow-y-auto custom-scrollbar bg-dark-card/50">
+                                    <table className="w-full text-left text-sm text-gray-400">
+                                      <thead className="bg-white/5 text-gray-200 sticky top-0 backdrop-blur-sm z-10">
+                                        <tr>
+                                          <th className="p-3 font-semibold text-xs uppercase">Issues ({lintIssues.length})</th>
                                         </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
+                                      </thead>
+                                      <tbody className="divide-y divide-white/5">
+                                        {lintIssues.map((issue, idx) => (
+                                          <tr 
+                                            key={idx} 
+                                            onClick={() => setSelectedLintIssue(idx)}
+                                            className={`cursor-pointer transition-colors ${selectedLintIssue === idx ? 'bg-white/10' : 'hover:bg-white/5'}`}
+                                          >
+                                            <td className="p-3">
+                                              <div className="flex items-center justify-between mb-1">
+                                                {issue.severity === 'error' ? (
+                                                  <span className="inline-flex items-center gap-1 text-red-400 text-xs font-bold uppercase">
+                                                    <AlertTriangle size={10} /> Error
+                                                  </span>
+                                                ) : issue.severity === 'warning' ? (
+                                                  <span className="inline-flex items-center gap-1 text-yellow-400 text-xs font-bold uppercase">
+                                                    <AlertTriangle size={10} /> Warn
+                                                  </span>
+                                                ) : (
+                                                  <span className="inline-flex items-center gap-1 text-blue-400 text-xs font-bold uppercase">
+                                                    <InfoIcon size={10} /> Info
+                                                  </span>
+                                                )}
+                                                <span className="font-mono text-xs text-gray-600">L{issue.line || '?'}</span>
+                                              </div>
+                                              <div className="text-gray-300 line-clamp-2 text-xs mb-1">{issue.message}</div>
+                                              {issue.suggestion && (
+                                                <div className="text-neon-cyan/60 italic text-[10px] line-clamp-1">Tip: {issue.suggestion}</div>
+                                              )}
+                                            </td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  </div>
+                                  {/* Right Pane: Annotated Code View */}
+                                  <div className="flex-1 h-full overflow-hidden bg-[#1d1f21] relative">
+                                    <AnnotatedCodeView 
+                                      code={bundledCode} 
+                                      issues={lintIssues} 
+                                      selectedIssueIndex={selectedLintIssue} 
+                                    />
+                                  </div>
                                 </div>
-                                {/* Right Pane: Annotated Code View */}
-                                <div className="flex-1 h-full overflow-hidden bg-[#1d1f21] relative">
-                                  <AnnotatedCodeView 
-                                    code={bundledCode} 
-                                    issues={lintIssues} 
-                                    selectedIssueIndex={selectedLintIssue} 
-                                  />
+                              ) : (
+                                <div className="flex flex-col items-center justify-center h-full text-gray-500 italic text-center p-6">
+                                  <Bug size={40} className="mb-4 opacity-20" />
+                                  <p>Click "Run Linter" to check for syntax errors, <br/> bugs, and bad practices.</p>
+                                  {lintIssues.length === 0 && !isLintLoading && activeAiTab === 'lint' && (
+                                    <p className="mt-2 text-green-500/50 text-xs font-bold flex items-center gap-1 justify-center">
+                                      <Check size={14} /> No issues found! Clean code.
+                                    </p>
+                                  )}
                                 </div>
-                              </div>
-                            ) : (
-                              <div className="flex flex-col items-center justify-center h-full text-gray-500 italic text-center p-6">
-                                <Bug size={40} className="mb-4 opacity-20" />
-                                <p>Click "Run Linter" to check for syntax errors, <br/> bugs, and bad practices.</p>
-                                {lintIssues.length === 0 && !isLintLoading && activeAiTab === 'lint' && (
-                                  <p className="mt-2 text-green-500/50 text-xs font-bold flex items-center gap-1 justify-center">
-                                    <Check size={14} /> No issues found! Clean code.
-                                  </p>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                } />
 
-              {viewMode === ViewMode.PREVIEW && (
-                <div className="h-full w-full bg-white rounded-xl overflow-hidden relative">
-                  {files.length === 0 ? (
-                    <div className="h-full flex flex-col items-center justify-center text-gray-500 gap-4 bg-dark-card border-none">
-                      <Play size={48} className="opacity-20" />
-                      <p>Add files to generate a live preview.</p>
-                    </div>
-                  ) : (
-                    <iframe 
-                      src={previewUrl || ''} 
-                      className="w-full h-full border-none bg-white"
-                      title="Live Preview"
-                      sandbox="allow-scripts allow-modals allow-same-origin"
-                    />
-                  )}
-                </div>
-              )}
+                {/* Preview View */}
+                <Route path="/preview" element={
+                  <div className="h-full w-full bg-white rounded-xl overflow-hidden relative">
+                    {files.length === 0 ? (
+                      <div className="h-full flex flex-col items-center justify-center text-gray-500 gap-4 bg-dark-card border-none">
+                        <Play size={48} className="opacity-20" />
+                        <p>Add files to generate a live preview.</p>
+                      </div>
+                    ) : (
+                      <iframe 
+                        src={previewUrl || ''} 
+                        className="w-full h-full border-none bg-white"
+                        title="Live Preview"
+                        sandbox="allow-scripts allow-modals allow-same-origin"
+                      />
+                    )}
+                  </div>
+                } />
+              </Routes>
             </div>
           </div>
         </div>
       </div>
     </div>
+  );
+};
+
+const App: React.FC = () => {
+  return (
+    <HashRouter>
+      <BundleBlitz />
+    </HashRouter>
   );
 };
 

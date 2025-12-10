@@ -2,7 +2,8 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { LintIssue } from "../types";
 
 const getAiClient = () => {
-  const apiKey = process.env.API_KEY;
+  // Safety check for process.env in browser environments
+  const apiKey = typeof process !== 'undefined' && process.env ? process.env.API_KEY : undefined;
   if (!apiKey) return null;
   return new GoogleGenAI({ apiKey });
 };
@@ -23,19 +24,28 @@ export const analyzeBundleWithGemini = async (code: string): Promise<string> => 
     const response = await ai.models.generateContent({
       model,
       config: {
-        systemInstruction: "You are an expert senior software engineer specializing in web security and performance optimization.",
+        systemInstruction: "You are an expert senior software engineer specializing in web security, code quality, and performance optimization. Provide concise, actionable, and harsh feedback.",
       },
       contents: `Analyze the provided JavaScript/TypeScript bundled code.
       
-      Report Structure:
-      1. **Bundle Purpose**: Briefly explain what this code likely does.
-      2. **Security Assessment**: Identify potential vulnerabilities (XSS, secrets, eval, unsafe DOM manipulation).
-      3. **Performance Optimization**: Suggest specific improvements (loops, memory usage, rendering).
-      4. **Code Quality**: Point out anti-patterns or modern syntax improvements.
+      Output a report in Markdown format with the following specific sections:
 
-      If the code appears safe and optimized, state that clearly.
+      ### 1. 🛡️ Security Risks
+      Identify potential vulnerabilities such as XSS, injection attacks, hardcoded secrets, unsafe 'eval' usage, or insecure DOM manipulation. If none, state "No critical risks found."
 
-      Code:
+      ### 2. 🚫 Bad Practices & Anti-Patterns
+      Highlight code smells, deprecated APIs, poor variable naming, lack of error handling, or spaghetti code. Suggest modern alternatives.
+
+      ### 3. ⚡ Performance Optimizations
+      Suggest specific improvements for runtime speed, memory usage, rendering cycles, or bundle size reduction.
+
+      ### 4. 🎨 Style Guide & Consistency
+      Evaluate adherence to standard style guides (e.g., Airbnb, StandardJS). Identify inconsistent naming (camelCase vs snake_case), improper spacing, or structural inconsistencies.
+
+      ### 5. 📝 Executive Summary
+      A one-paragraph summary of what this bundle does and its overall quality score (0-100).
+
+      Code to analyze:
       \`\`\`javascript
       ${truncatedCode}
       \`\`\`
