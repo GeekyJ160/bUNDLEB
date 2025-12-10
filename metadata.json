@@ -1,0 +1,5 @@
+{
+  "name": "BundleBlitz",
+  "description": "A high-performance, single-file web bundler with neon aesthetics, real-time visualization, and AI-powered code analysis.",
+  "requestFramePermissions": []
+}
