@@ -21,7 +21,8 @@
     "react-router-dom": "6.28.0",
     "@remix-run/router": "1.21.0",
     "react-is": "18.3.1",
-    "marked": "15.0.3"
+    "marked": "15.0.3",
+    "diff": "5.2.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
