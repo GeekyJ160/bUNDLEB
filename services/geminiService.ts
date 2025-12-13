@@ -24,7 +24,7 @@ export const analyzeBundleWithGemini = async (code: string): Promise<string> => 
     const response = await ai.models.generateContent({
       model,
       config: {
-        systemInstruction: "You are an expert senior software engineer specializing in web security, code quality, anti-patterns, and performance optimization. Your goal is to provide a strict, actionable code audit.",
+        systemInstruction: "You are an expert senior software engineer specializing in web security, code quality, anti-patterns, performance optimization, and software architecture. Your goal is to provide a strict, actionable code audit focusing on modularity, maintainability, and security.",
       },
       contents: `Analyze the provided JavaScript/TypeScript bundled code.
       
@@ -40,7 +40,7 @@ export const analyzeBundleWithGemini = async (code: string): Promise<string> => 
       Suggest specific improvements for runtime speed, memory usage, rendering cycles, or bundle size reduction (e.g., tree-shaking opportunities, expensive loops, layout thrashing).
 
       ### 4. 🧱 Code Structure & Modularity
-      Briefly assess the organization. Identify monolithic functions or high coupling. Suggest how to break down complex logic.
+      Evaluate the codebase's architectural quality. Identify issues with separation of concerns, tight coupling between modules, monolithic functions, or poor file organization. Suggest specific refactoring strategies to improve modularity and reusability.
 
       ### 5. 📝 Executive Summary
       A concise summary of the bundle's overall quality score (0-100) and the most urgent fix required.
