@@ -5,25 +5,29 @@ interface DropZoneProps {
   onFilesSelected: (files: File[]) => void;
 }
 
+const IGNORE_LIST = [
+  'node_modules', '.git', '.svn', '.DS_Store', 'thumbs.db', 
+  '.next', '.cache', '.vscode', '.idea', 'package-lock.json', 
+  'yarn.lock', 'pnpm-lock.yaml'
+];
+
 export const DropZone: React.FC<DropZoneProps> = ({ onFilesSelected }) => {
   const [isDragOver, setIsDragOver] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
 
-  // Helper to read file from entry
   const getFile = (entry: any): Promise<File> => {
     return new Promise((resolve) => {
       entry.file((file: File) => {
-        // Monkey-patch the full path if possible, otherwise falls back to name
-        const fileWithEntryPath = file;
-        // @ts-ignore
-        fileWithEntryPath.entryPath = entry.fullPath; 
-        resolve(fileWithEntryPath);
+        resolve(file);
       });
     });
   };
 
-  // Recursive directory scanner
   const scanEntry = async (entry: any): Promise<File[]> => {
+    if (IGNORE_LIST.some(ignored => entry.name.toLowerCase() === ignored)) {
+      return [];
+    }
+
     if (entry.isFile) {
       return [await getFile(entry)];
     } else if (entry.isDirectory) {
@@ -36,7 +40,6 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFilesSelected }) => {
         });
       };
 
-      // readEntries might not return all files in one go, loop until empty
       let batch = await readBatch();
       while (batch.length > 0) {
         allEntries = [...allEntries, ...batch];
@@ -72,7 +75,6 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFilesSelected }) => {
       let resultFiles: File[] = [];
 
       if (items && items.length > 0) {
-        // Use DataTransferItem interface for folder support
         for (let i = 0; i < items.length; i++) {
           const item = items[i];
           if (item.kind === 'file') {
@@ -86,7 +88,6 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFilesSelected }) => {
           }
         }
       } else if (e.dataTransfer.files) {
-        // Fallback for browsers not supporting items/webkitGetAsEntry
         resultFiles = Array.from(e.dataTransfer.files);
       }
 
@@ -123,16 +124,10 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFilesSelected }) => {
       <input
         type="file"
         multiple
-        // @ts-ignore - non-standard attribute for folder selection
-        webkitdirectory="" 
-        directory=""
         className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
         onChange={handleInputChange}
       />
       
-      {/* Animated Background Gradient */}
-      <div className={`absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent -translate-x-full transition-transform duration-1000 ${isDragOver ? 'translate-x-full' : ''}`} />
-
       <div className="z-20 flex flex-col items-center gap-4">
         <div className={`p-4 rounded-full transition-colors duration-300 ${isDragOver ? 'bg-neon-magenta text-white' : 'bg-dark-bg text-neon-cyan'}`}>
           {isScanning ? (
@@ -146,10 +141,10 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFilesSelected }) => {
         
         <div className="space-y-2">
           <h3 className="text-xl font-bold text-white">
-            {isScanning ? 'Scanning directory...' : isDragOver ? 'Drop folder to scan' : 'Drag & Drop files or folders'}
+            {isScanning ? 'Scanning directory...' : isDragOver ? 'Drop folder here' : 'Drop project folder'}
           </h3>
           <p className="text-gray-400 text-sm max-w-xs mx-auto">
-            Automatically detects folders and generates a bundle. Supports JS, HTML, CSS.
+            Drop your code workspace. We'll automatically filter out binary and junk files.
           </p>
         </div>
       </div>

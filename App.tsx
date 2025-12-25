@@ -1,47 +1,51 @@
 import React, { useState, useCallback, useEffect, useMemo, useRef } from 'react';
-import { HashRouter, Routes, Route, Link, useLocation, Navigate } from 'react-router-dom';
+import { 
+  createHashRouter, 
+  RouterProvider, 
+  Routes, 
+  Route, 
+  Link, 
+  useLocation, 
+  Navigate,
+  useNavigate
+} from 'react-router-dom';
 import { DropZone } from './components/DropZone';
 import { Visualizer } from './components/Visualizer';
 import { DiagnosticPanel } from './components/DiagnosticPanel';
 import { AnnotatedCodeView } from './components/AnnotatedCodeView';
 import { DiffView } from './components/DiffView';
-import { FileEntry, Diagnostic, BundleStats, LintIssue } from './types';
-import { analyzeBundleWithGemini, lintBundleWithGemini, refactorBundleWithGemini } from './services/geminiService';
+import { Playground } from './components/Playground';
+import { FileEntry, Diagnostic, BundleStats, LintIssue, ComponentMetadata } from './types';
+import { analyzeBundleWithGemini, lintBundleWithGemini, refactorBundleWithGemini, discoverComponentsWithGemini } from './services/geminiService';
+import { performStaticLint } from './services/eslintService';
 import { 
   Zap, Download, Copy, Trash2, LayoutTemplate, 
   Activity, Sparkles, Code, FileText, Settings, Play,
   FileJson, Palette, File as FileGeneric, Braces, AlignLeft,
   Bug, AlertTriangle, Check, Info as InfoIcon, FileCode2,
-  Globe, Paintbrush, RotateCw, GitCompare
+  Globe, Paintbrush, RotateCw, GitCompare, Boxes, ExternalLink,
+  ChevronRight, ClipboardCheck, AlertCircle, ListFilter,
+  ShieldCheck, Cpu, SearchCode, BookOpen, StickyNote
 } from 'lucide-react';
 
 const STORAGE_KEY_CODE = 'bundle_blitz_code';
 const STORAGE_KEY_FILES = 'bundle_blitz_files';
-const STORAGE_KEY_SETTINGS = 'bundle_blitz_settings';
 
 const getFileTypeInfo = (fileName: string) => {
   const ext = fileName.split('.').pop()?.toLowerCase();
   switch (ext) {
-    case 'js':
-    case 'jsx':
-    case 'ts':
-    case 'tsx':
-    case 'mjs':
+    case 'js': case 'jsx': case 'ts': case 'tsx': case 'mjs':
       return { Icon: FileCode2, color: 'text-yellow-400', bg: 'bg-yellow-400/10', label: 'JavaScript' };
-    case 'css':
-    case 'scss':
-    case 'less':
-    case 'sass':
+    case 'css': case 'scss': case 'less': case 'sass':
       return { Icon: Paintbrush, color: 'text-blue-400', bg: 'bg-blue-400/10', label: 'Style' };
-    case 'html':
-    case 'htm':
+    case 'html': case 'htm':
       return { Icon: Globe, color: 'text-orange-400', bg: 'bg-orange-400/10', label: 'HTML' };
     case 'json':
-      return { Icon: FileJson, color: 'text-emerald-400', bg: 'bg-emerald-400/10', label: 'JSON Data' };
+      return { Icon: FileJson, color: 'text-emerald-400', bg: 'bg-emerald-400/10', label: 'JSON Config' };
     case 'md':
-      return { Icon: FileText, color: 'text-pink-400', bg: 'bg-pink-400/10', label: 'Markdown' };
+      return { Icon: BookOpen, color: 'text-pink-400', bg: 'bg-pink-400/10', label: 'Markdown Doc' };
     case 'txt':
-      return { Icon: AlignLeft, color: 'text-gray-400', bg: 'bg-gray-400/10', label: 'Plain Text' };
+      return { Icon: StickyNote, color: 'text-amber-400', bg: 'bg-orange-400/10', label: 'Plain Text' };
     case 'csv':
       return { Icon: FileText, color: 'text-green-300', bg: 'bg-green-300/10', label: 'CSV Data' };
     default:
@@ -49,157 +53,110 @@ const getFileTypeInfo = (fileName: string) => {
   }
 };
 
+const isBinaryFile = async (file: File): Promise<boolean> => {
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer.slice(0, 8192));
+  let nonPrintableCount = 0;
+  
+  for (let i = 0; i < bytes.length; i++) {
+    const byte = bytes[i];
+    if (byte === 0) return true; 
+    if (byte < 7 || (byte > 13 && byte < 32)) nonPrintableCount++;
+  }
+  
+  return (nonPrintableCount / bytes.length) > 0.1;
+};
+
 const constructPreview = (files: FileEntry[]) => {
   const htmlFile = files.find(f => /\.(html|htm)$/i.test(f.name));
   const cssFiles = files.filter(f => /\.(css|scss|less)$/i.test(f.name));
-  const jsFiles = files.filter(f => /\.(js|ts|jsx|tsx)$/i.test(f.name));
+  const jsFiles = files.filter(f => /\.(js|ts|jsx|tsx|mjs)$/i.test(f.name));
 
-  // Determine base HTML structure. 
-  // If user provides a fragment (no html tag), wrap it in a proper boilerplate.
-  let html = htmlFile ? htmlFile.content : '';
+  let htmlContent = htmlFile ? htmlFile.content : '';
 
-  if (!html) {
-    // Default boilerplate if no HTML file exists
-    html = `<!DOCTYPE html>
+  // Ensure there's some content even if no HTML file is provided
+  if (!htmlContent) {
+    htmlContent = '<div id="root"></div>';
+  }
+
+  // Check for existing structural elements
+  const hasDocType = /<!DOCTYPE html/i.test(htmlContent);
+  const hasHtmlTag = /<html/i.test(htmlContent);
+  const hasHeadTag = /<head/i.test(htmlContent);
+  const hasBodyTag = /<body/i.test(htmlContent);
+  const hasTitleTag = /<title/i.test(htmlContent);
+
+  let finalHtml = htmlContent;
+
+  // 1. Ensure basic HTML5 structure if missing
+  if (!hasDocType && !hasHtmlTag) {
+    finalHtml = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="description" content="Preview generated by BundleBlitz">
   <title>BundleBlitz Preview</title>
 </head>
 <body>
-  <div id="root"></div>
-  <div id="app"></div>
+  ${htmlContent}
 </body>
 </html>`;
-  } else if (!html.toLowerCase().includes('<html')) {
-    // If user provided HTML but it's just a fragment (e.g. <div>...</div>)
-    html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Preview</title>
-</head>
-<body>
-  ${html}
-</body>
-</html>`;
-  }
-
-  // Common styles for the preview environment
-  const baseStyles = `
-    /* Reset & Base Styles */
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      line-height: 1.6;
-      color: #1f2937;
-      background-color: #ffffff;
-    }
-    *, *::before, *::after { box-sizing: border-box; }
-
-    /* Standard Root Containers */
-    #root, #app { width: 100%; height: 100%; }
-
-    /* Bundle Loader Overlay */
-    .bundle-loader {
-      position: fixed; inset: 0;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      background: #f9fafb; z-index: 10000;
-      transition: opacity 0.4s ease-out;
-    }
-    .bundle-loader h1 {
-      color: #2563eb; font-size: 1.5rem; margin-bottom: 1rem;
-      font-weight: 600; letter-spacing: -0.025em;
-    }
-    .spinner {
-      width: 32px; height: 32px;
-      border: 3px solid #e5e7eb; border-top-color: #2563eb;
-      border-radius: 50%; animation: spin 0.8s linear infinite;
-    }
-    @keyframes spin { to { transform: rotate(360deg); } }
-  `;
-
-  // Loader script to auto-dismiss when content appears
-  const loaderScript = `
-  <div id="bundle-loader" class="bundle-loader">
-    <h1>BundleBlitz Preview</h1>
-    <div class="spinner"></div>
-  </div>
-  <script>
-    (function() {
-      const loader = document.getElementById('bundle-loader');
-      const hideLoader = () => {
-        if (loader) {
-          loader.style.opacity = '0';
-          setTimeout(() => loader.remove(), 400);
-        }
-      };
-
-      // Detect when content is mounted to root containers or body changes significantly
-      const observer = new MutationObserver(() => {
-        const root = document.getElementById('root');
-        const app = document.getElementById('app');
-        const hasRootContent = (root && root.innerHTML.trim().length > 0);
-        const hasAppContent = (app && app.innerHTML.trim().length > 0);
-        
-        if (hasRootContent || hasAppContent) {
-          hideLoader();
-          observer.disconnect();
-        }
-      });
-      observer.observe(document.body, { childList: true, subtree: true });
-
-      // Fallback timeout to ensure loader doesn't stick forever if app mounts silently or fails
-      setTimeout(hideLoader, 2500);
-      
-      // Also hide immediately if document is already loaded and we suspect it's static HTML
-      window.addEventListener('load', () => {
-         // If we are not waiting for a JS bundle to mount something, hide sooner
-         setTimeout(hideLoader, 500);
-      });
-    })();
-  </script>`;
-
-  // Inject Styles
-  const combinedStyles = cssFiles.map(f => f.content).join('\n');
-  const styleBlock = `<style>\n${baseStyles}\n/* --- User Styles --- */\n${combinedStyles}\n</style>`;
-  
-  if (html.toLowerCase().includes('</head>')) {
-    html = html.replace(/<\/head>/i, `${styleBlock}\n</head>`);
   } else {
-    html = html.replace(/<body>/i, `<head>${styleBlock}</head>\n<body>`);
-  }
-
-  // Inject JS & Loader
-  if (jsFiles.length > 0) {
-    const scripts = jsFiles.map(f => f.content).join('\n');
-    // Escape closing script tags to prevent breaking the generated HTML
-    const safeScripts = scripts.replace(/<\/script>/g, '<\\/script>');
-    const scriptBlock = `<script type="module">\n/* --- BundleBlitz Scripts --- */\n${safeScripts}\n</script>`;
-    
-    // Inject loader only if we are injecting JS, implying a dynamic app
-    if (html.toLowerCase().includes('</body>')) {
-      // Add loader at start of body, scripts at end
-      html = html.replace(/<body>/i, `<body>${loaderScript}`);
-      html = html.replace(/<\/body>/i, `${scriptBlock}\n</body>`);
+    // Inject essential tags into existing structure
+    if (!hasHeadTag) {
+      finalHtml = finalHtml.replace(/<html[^>]*>/i, (m) => `${m}\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>BundleBlitz Preview</title>\n</head>`);
     } else {
-      html += `${loaderScript}${scriptBlock}`;
-    }
-  } else if (cssFiles.length > 0 && !htmlFile) {
-     // If only CSS and no HTML file, show the loader briefly then hide it to show blank page with styles? 
-     // Or just don't show loader. Let's add loader script anyway if it's the generated boilerplate.
-      if (html.includes('id="root"')) {
-         html = html.replace(/<body>/i, `<body>${loaderScript}`);
+      // Add missing meta/title tags if <head> exists but they are missing
+      if (!/<meta[^>]*charset/i.test(finalHtml)) {
+        finalHtml = finalHtml.replace(/<head[^>]*>/i, (m) => `${m}\n  <meta charset="UTF-8">`);
       }
+      if (!/<meta[^>]*viewport/i.test(finalHtml)) {
+        finalHtml = finalHtml.replace(/<head[^>]*>/i, (m) => `${m}\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">`);
+      }
+      if (!hasTitleTag) {
+        finalHtml = finalHtml.replace(/<head[^>]*>/i, (m) => `${m}\n  <title>BundleBlitz Preview</title>`);
+      }
+    }
   }
 
-  return html;
-};
+  // 2. Prepare Styles (Normalized + User Styles)
+  const baseStyles = `
+    :root { 
+      font-family: system-ui, -apple-system, sans-serif; 
+      line-height: 1.5; 
+      background-color: #ffffff; 
+      color: #0f172a; 
+    } 
+    @media (prefers-color-scheme: dark) { 
+      :root { background-color: #0f172a; color: #f1f5f9; } 
+    }
+    body { margin: 0; padding: 0; }
+  `;
+  const userStyles = cssFiles.map(f => `/* --- ${f.name} --- */\n${f.content}`).join('\n');
+  const styleBlock = `<style>\n${baseStyles}\n${userStyles}\n</style>`;
+  
+  // Inject style block into <head>
+  if (finalHtml.toLowerCase().includes('</head>')) {
+    finalHtml = finalHtml.replace(/<\/head>/i, `${styleBlock}\n</head>`);
+  } else {
+    finalHtml = finalHtml.replace(/<body[^>]*>/i, (match) => `<head>${styleBlock}</head>\n${match}`);
+  }
 
-type BundleType = 'JS' | 'HTML';
+  // 3. Prepare Scripts (Module-based to support import/export syntax)
+  if (jsFiles.length > 0) {
+    const scripts = jsFiles.map(f => `// --- ${f.name} ---\n${f.content}`).join('\n');
+    const scriptBlock = `<script type="module">\n${scripts.replace(/<\/script>/g, '<\\/script>')}\n</script>`;
+    
+    // Inject scripts at end of <body>
+    if (finalHtml.toLowerCase().includes('</body>')) {
+      finalHtml = finalHtml.replace(/<\/body>/i, `${scriptBlock}\n</body>`);
+    } else {
+      finalHtml += `\n${scriptBlock}`;
+    }
+  }
+
+  return finalHtml;
+};
 
 const BundleBlitz: React.FC = () => {
   const location = useLocation();
@@ -207,29 +164,20 @@ const BundleBlitz: React.FC = () => {
   const [bundledCode, setBundledCode] = useState<string>('');
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isCopied, setIsCopied] = useState(false);
   
-  // AI State
   const [aiAnalysis, setAiAnalysis] = useState<string>('');
   const [renderedAnalysis, setRenderedAnalysis] = useState<string>('');
   const [lintIssues, setLintIssues] = useState<LintIssue[]>([]);
-  const [refactoredCode, setRefactoredCode] = useState<string>('');
-  const [activeAiTab, setActiveAiTab] = useState<'analysis' | 'lint' | 'refactor'>('analysis');
+  const [discoveredComponents, setDiscoveredComponents] = useState<ComponentMetadata[]>([]);
+  const [activeAiTab, setActiveAiTab] = useState<'analysis' | 'lint' | 'discover'>('analysis');
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [isLintLoading, setIsLintLoading] = useState(false);
-  const [isRefactoring, setIsRefactoring] = useState(false);
-  const [selectedLintIssue, setSelectedLintIssue] = useState<number | null>(null);
-  const [refactorInstruction, setRefactorInstruction] = useState('Optimize and clean up this code.');
-
-  const [bundleType, setBundleType] = useState<BundleType>('JS');
+  const [isDiscovering, setIsDiscovering] = useState(false);
+  
+  const [bundleType, setBundleType] = useState<'JS' | 'HTML'>('JS');
   const [enableTranspilation, setEnableTranspilation] = useState(true);
-  const [enableFormatting, setEnableFormatting] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-
-  // Auto-save refs
-  const filesRef = useRef(files);
-  const bundledCodeRef = useRef(bundledCode);
-  const lastSavedFilesRef = useRef<string>('');
-  const lastSavedCodeRef = useRef<string>('');
 
   const addDiagnostic = (message: string, type: Diagnostic['type'] = 'info') => {
     setDiagnostics(prev => [...prev, {
@@ -240,380 +188,191 @@ const BundleBlitz: React.FC = () => {
     }]);
   };
 
-  // Sync state to refs for auto-save
-  useEffect(() => {
-    filesRef.current = files;
-    bundledCodeRef.current = bundledCode;
-  }, [files, bundledCode]);
-
-  // Restore state from LocalStorage on mount
   useEffect(() => {
     const savedCode = localStorage.getItem(STORAGE_KEY_CODE);
     const savedFiles = localStorage.getItem(STORAGE_KEY_FILES);
-    const savedSettings = localStorage.getItem(STORAGE_KEY_SETTINGS);
-    
-    let restoredCount = 0;
-
     if (savedFiles) {
       try {
         const parsedFiles = JSON.parse(savedFiles);
-        if (Array.isArray(parsedFiles) && parsedFiles.length > 0) {
-          setFiles(parsedFiles);
-          lastSavedFilesRef.current = savedFiles; // Sync for auto-save
-          restoredCount = parsedFiles.length;
-        }
-      } catch (e) {
-        console.error('Failed to parse saved files', e);
-      }
+        if (Array.isArray(parsedFiles)) setFiles(parsedFiles);
+      } catch (e) {}
     }
-
-    if (savedCode) {
-      setBundledCode(savedCode);
-      lastSavedCodeRef.current = savedCode; // Sync for auto-save
-    }
-    
-    if (savedSettings) {
-      try {
-        const parsedSettings = JSON.parse(savedSettings);
-        if (parsedSettings.bundleType) setBundleType(parsedSettings.bundleType);
-        if (parsedSettings.enableTranspilation !== undefined) setEnableTranspilation(parsedSettings.enableTranspilation);
-        if (parsedSettings.enableFormatting !== undefined) setEnableFormatting(parsedSettings.enableFormatting);
-      } catch (e) {
-        console.error('Failed to parse saved settings', e);
-      }
-    }
-
-    if (restoredCount > 0 || savedCode) {
-      addDiagnostic(`Restored previous session: ${restoredCount} files and bundled output loaded.`, 'info');
-    }
+    if (savedCode) setBundledCode(savedCode);
   }, []);
 
-  // Save settings whenever they change
-  useEffect(() => {
-    const settings = {
-      bundleType,
-      enableTranspilation,
-      enableFormatting
-    };
-    localStorage.setItem(STORAGE_KEY_SETTINGS, JSON.stringify(settings));
-  }, [bundleType, enableTranspilation, enableFormatting]);
-
-  // Auto-save Interval (every 30 seconds)
-  useEffect(() => {
-    const intervalId = setInterval(() => {
-      const currentFiles = filesRef.current;
-      const currentCode = bundledCodeRef.current;
-      
-      let filesStr = '';
-      try {
-        filesStr = JSON.stringify(currentFiles);
-      } catch(e) {
-        console.warn('Failed to stringify files for auto-save', e);
-        return;
-      }
-
-      const filesChanged = filesStr !== lastSavedFilesRef.current;
-      const codeChanged = currentCode !== lastSavedCodeRef.current;
-
-      if (filesChanged || codeChanged) {
-        try {
-          if (filesChanged && currentFiles.length > 0) {
-            localStorage.setItem(STORAGE_KEY_FILES, filesStr);
-            lastSavedFilesRef.current = filesStr;
-          }
-          if (codeChanged && currentCode) {
-            localStorage.setItem(STORAGE_KEY_CODE, currentCode);
-            lastSavedCodeRef.current = currentCode;
-          }
-        } catch (e) {
-          console.warn('Auto-save failed: quota exceeded');
-        }
-      }
-    }, 30000); // 30 seconds
-
-    return () => clearInterval(intervalId);
-  }, []);
-
-  // Update preview URL when switching to preview tab or files change
   useEffect(() => {
     if (location.pathname === '/preview') {
       const html = constructPreview(files);
       const blob = new Blob([html], { type: 'text/html' });
       const url = URL.createObjectURL(blob);
       setPreviewUrl(url);
-
-      // Cleanup
       return () => URL.revokeObjectURL(url);
     }
   }, [files, location.pathname]);
 
-  // Render Markdown for AI Analysis
+  // Handle markdown rendering for analysis
   useEffect(() => {
-    if (!aiAnalysis) return;
-    const renderMarkdown = async () => {
+    if (!aiAnalysis) {
+      setRenderedAnalysis('');
+      return;
+    }
+    const render = async () => {
       try {
-        // @ts-ignore
-        const markedMod = await import('marked');
-        const parse = markedMod.parse || markedMod.marked?.parse || markedMod.default?.parse;
-        if (parse) {
-          const html = await parse(aiAnalysis);
-          setRenderedAnalysis(html);
-        } else {
-          setRenderedAnalysis(aiAnalysis); // Fallback
-        }
+        const { marked } = await import('marked');
+        const html = await marked.parse(aiAnalysis);
+        setRenderedAnalysis(html);
       } catch (e) {
-        console.error('Failed to load marked', e);
         setRenderedAnalysis(aiAnalysis);
       }
     };
-    renderMarkdown();
+    render();
   }, [aiAnalysis]);
+
+  const runEslint = useCallback((code: string) => {
+    if (!code) return;
+    const messages = performStaticLint(code);
+    
+    if (messages.length === 0) {
+      addDiagnostic("ESLint: No static style issues found.", "info");
+      return;
+    }
+
+    messages.forEach((msg, idx) => {
+      const severity = msg.severity === 2 ? 'error' : 'warning';
+      addDiagnostic(`[ESLint] Line ${msg.line}: ${msg.message} (${msg.ruleId})`, severity);
+    });
+  }, []);
 
   const handleFilesSelected = async (selectedFiles: File[]) => {
     setIsProcessing(true);
     const newFileEntries: FileEntry[] = [];
-    let hasHtml = false;
-    
+    let binaryCount = 0;
+
     try {
       for (const file of selectedFiles) {
+        if (await isBinaryFile(file)) {
+          binaryCount++;
+          continue;
+        }
+        
         const text = await file.text();
         const ext = file.name.split('.').pop()?.toLowerCase();
-
-        // Type specific checks & diagnostics
-        if (ext === 'json') {
+        
+        // Granular diagnostics for .json, .txt, .md
+        if (!text || text.trim().length === 0) {
+          let msg = `File "${file.name}" is empty.`;
+          if (ext === 'json') msg = `JSON configuration file "${file.name}" is completely empty.`;
+          if (ext === 'md') msg = `Markdown documentation "${file.name}" has no content.`;
+          if (ext === 'txt') msg = `Plain text file "${file.name}" is blank.`;
+          addDiagnostic(msg, 'warning');
+        } else if (ext === 'json') {
           try {
-            JSON.parse(text);
-          } catch (e) {
-            addDiagnostic(`Invalid JSON syntax in ${file.name}`, 'error');
+            const parsed = JSON.parse(text);
+            if (Object.keys(parsed).length === 0 && !Array.isArray(parsed)) {
+              addDiagnostic(`JSON file "${file.name}" is just an empty object.`, 'info');
+            }
+          } catch (jsonErr) {
+            addDiagnostic(`Invalid JSON in "${file.name}": ${(jsonErr as Error).message}`, 'error');
           }
         } else if (ext === 'md') {
-          if (text.trim().length === 0) {
-            addDiagnostic(`Markdown file ${file.name} is empty`, 'warning');
-          } else if (!text.includes('#')) {
-            addDiagnostic(`Markdown file ${file.name} missing headers (#) - consider structuring content`, 'info');
-          }
-        } else if (ext === 'txt') {
-          if (text.trim().length === 0) {
-             addDiagnostic(`Text file ${file.name} is empty`, 'warning');
-          }
-        } else if (ext === 'html' || ext === 'htm') {
-           hasHtml = true;
-        } else if (['css', 'scss', 'less'].includes(ext || '')) {
-           if (text.includes('@import')) {
-             addDiagnostic(`Performance warning: @import found in ${file.name}`, 'warning');
-           }
-        } else if (['js', 'ts', 'jsx', 'tsx'].includes(ext || '')) {
-          if (text.includes('eval(')) {
-            addDiagnostic(`Security Warning: 'eval' usage detected in ${file.name}`, 'warning');
+          if (!text.includes('#') && !text.includes('- ') && !text.includes('* ')) {
+            addDiagnostic(`Markdown document "${file.name}" appears to lack standard formatting (headers/lists).`, 'info');
           }
         }
 
-        newFileEntries.push({
-          id: Math.random().toString(36).substr(2, 9),
-          name: file.name,
-          size: file.size,
-          content: text,
-          type: file.type
+        newFileEntries.push({ 
+          id: Math.random().toString(36).substr(2, 9), 
+          name: file.name, 
+          size: file.size, 
+          content: text, 
+          type: file.type 
         });
       }
       
-      setFiles(prev => [...prev, ...newFileEntries]);
-      
-      // Auto-switch to HTML mode if user drops an HTML file
-      if (hasHtml) {
-        setBundleType('HTML');
-        addDiagnostic('HTML file detected. Switched to HTML Bundle mode.', 'info');
+      if (newFileEntries.length > 0) {
+        setFiles(prev => [...prev, ...newFileEntries]);
+        addDiagnostic(`Successfully added ${newFileEntries.length} file(s) to workspace.`);
       }
-
-      addDiagnostic(`Successfully loaded ${selectedFiles.length} file(s).`, 'info');
-    } catch (err) {
-      addDiagnostic('Failed to read one or more files.', 'error');
-    } finally {
-      setIsProcessing(false);
+      
+      if (binaryCount > 0) {
+        addDiagnostic(`Skipped ${binaryCount} binary/system metadata file(s).`, 'warning');
+      }
+    } catch (err) { 
+      addDiagnostic('Error reading files from drop event.', 'error'); 
+    } finally { 
+      setIsProcessing(false); 
     }
   };
 
   const handleBundle = useCallback(async () => {
-    if (files.length === 0) {
-      addDiagnostic('No files to bundle.', 'warning');
-      return;
-    }
-
+    if (files.length === 0) return;
     setIsProcessing(true);
-    
-    // Allow UI to update to "processing" state
-    await new Promise(resolve => setTimeout(resolve, 100));
-
     try {
       let finalCode = '';
-
       if (bundleType === 'HTML') {
-        // --- HTML BUNDLER ---
-        addDiagnostic('Generating Single-File HTML Bundle...', 'info');
         finalCode = constructPreview(files);
       } else {
-        // --- JS BUNDLER ---
-        const header = `/**\n * BundleBlitz ⚡\n * Generated: ${new Date().toISOString()}\n * Files: ${files.length}\n */\n\n`;
+        const jsFiles = files.filter(f => /\.(js|ts|jsx|tsx|mjs|cjs)$/i.test(f.name));
         
-        let content = files.map(f => {
-          const ext = f.name.split('.').pop()?.toLowerCase();
-          const isScript = ['js', 'ts', 'jsx', 'tsx'].includes(ext || '');
-          
-          let fileContent = f.content;
-          
-          if (!isScript) {
-            const safeContent = f.content.replace(/\*\//g, '* /');
-            fileContent = `/*\n[Non-Script File: ${f.name}]\n\n${safeContent}\n*/`;
-          }
-
-          return `// --- BEGIN ${f.name} (${f.size} bytes) ---\n${fileContent}\n// --- END ${f.name} ---\n`;
-        }).join('\n');
+        if (jsFiles.length === 0) {
+           addDiagnostic("No JS/TS source files found. Bundling remaining text assets as generic source.", "warning");
+           finalCode = files.map(f => `// --- ${f.name} ---\n${f.content}\n`).join('\n');
+        } else {
+           finalCode = jsFiles.map(f => `// --- ${f.name} ---\n${f.content}\n`).join('\n');
+        }
         
-        finalCode = header + content;
-
-        // 1. Transpilation (Babel)
-        if (enableTranspilation) {
-          addDiagnostic('Loading Babel for transpilation...', 'info');
+        if (enableTranspilation && jsFiles.length > 0) {
           try {
-            // @ts-ignore
             const Babel = await import('@babel/standalone');
-            const transformFn = Babel.transform || (Babel as any).default?.transform;
-
-            if (transformFn) {
-              const result = transformFn(finalCode, {
-                presets: ['env'],
-                filename: 'bundle.js',
-                retainLines: true,
-              });
-              
-              if (result.code) {
-                finalCode = result.code;
-                addDiagnostic('Transpilation to ES5 successful.', 'info');
-              }
-            }
-          } catch (babelError: any) {
-            console.error(babelError);
-            addDiagnostic(`Transpilation warning: ${babelError.message}`, 'warning');
-          }
-        }
-      }
-
-      // 2. Formatting (Prettier) - Only for JS currently
-      if (enableFormatting && bundleType === 'JS') {
-        addDiagnostic('Formatting code with Prettier...', 'info');
-        try {
-          // @ts-ignore
-          const prettier = await import('prettier');
-          // @ts-ignore
-          const parserBabelMod = await import('prettier/plugins/babel');
-          // @ts-ignore
-          const parserEstreeMod = await import('prettier/plugins/estree');
-          
-          const prettierFormat = prettier.format || (prettier as any).default?.format;
-          const parserBabel = parserBabelMod.default || parserBabelMod;
-          const parserEstree = parserEstreeMod.default || parserEstreeMod;
-
-          if (prettierFormat) {
-             finalCode = await prettierFormat(finalCode, {
-              parser: 'babel',
-              plugins: [parserBabel, parserEstree],
-              semi: true,
-              singleQuote: true,
-              printWidth: 80,
+            const sanitizedCode = finalCode.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g, "");
+            
+            const res = Babel.transform(sanitizedCode, { 
+              presets: ['env', 'react'], 
+              filename: 'bundle.js', 
+              retainLines: true 
             });
-            addDiagnostic('Code formatted successfully.', 'info');
+            if (res.code) finalCode = res.code;
+          } catch (babelError) {
+            const msg = (babelError as Error).message;
+            throw new Error(`Syntax Error in workspace code: ${msg.split('\n')[0]}. Ensure you are not bundling non-JS files.`);
           }
-        } catch (fmtError: any) {
-          console.error(fmtError);
-          addDiagnostic(`Formatting failed: ${fmtError.message}`, 'warning');
         }
       }
-      
+
       setBundledCode(finalCode);
-      addDiagnostic(`Bundle created successfully! Size: ${finalCode.length} bytes.`, 'info');
+      addDiagnostic(`Workspace bundled successfully as ${bundleType}.`);
       
-      // Clear previous analysis/refactor state
-      setAiAnalysis('');
-      setRenderedAnalysis('');
-      setLintIssues([]);
-      setRefactoredCode('');
-      setSelectedLintIssue(null);
-
-      try {
-        const filesStr = JSON.stringify(files);
-        localStorage.setItem(STORAGE_KEY_CODE, finalCode);
-        localStorage.setItem(STORAGE_KEY_FILES, filesStr);
-        // Sync refs for auto-saver to know we just saved
-        lastSavedCodeRef.current = finalCode;
-        lastSavedFilesRef.current = filesStr;
-      } catch (e) {
-        addDiagnostic('Auto-save failed: Storage quota exceeded.', 'warning');
-      }
-
-    } catch (err) {
+      runEslint(finalCode);
+      
+      localStorage.setItem(STORAGE_KEY_CODE, finalCode);
+      localStorage.setItem(STORAGE_KEY_FILES, JSON.stringify(files));
+    } catch (err) { 
       console.error(err);
-      addDiagnostic('Error during bundling process.', 'error');
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [files, enableTranspilation, enableFormatting, bundleType]);
-
-  const handleDownload = () => {
-    if (!bundledCode) return;
-    const isHtml = bundleType === 'HTML';
-    const blob = new Blob([bundledCode], { type: isHtml ? 'text/html' : 'text/javascript' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = isHtml ? 'index.html' : 'bundle.js';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    addDiagnostic(`Download started (${a.download}).`, 'info');
-  };
+      addDiagnostic(`${(err as Error).message}`, 'error'); 
+    } finally { setIsProcessing(false); }
+  }, [files, enableTranspilation, bundleType, runEslint]);
 
   const handleCopy = () => {
     if (!bundledCode) return;
-    navigator.clipboard.writeText(bundledCode)
-      .then(() => addDiagnostic('Bundled code copied to clipboard.', 'info'))
-      .catch(() => addDiagnostic('Failed to copy to clipboard.', 'error'));
+    navigator.clipboard.writeText(bundledCode);
+    setIsCopied(true);
+    setTimeout(() => setIsCopied(false), 2000);
+    addDiagnostic('Bundle copied to clipboard.');
   };
 
-  const handleClear = () => {
-    setFiles([]);
-    setBundledCode('');
-    setDiagnostics([]);
-    setAiAnalysis('');
-    setRenderedAnalysis('');
-    setLintIssues([]);
-    setRefactoredCode('');
-    setSelectedLintIssue(null);
-    localStorage.removeItem(STORAGE_KEY_CODE);
-    localStorage.removeItem(STORAGE_KEY_FILES);
-    localStorage.removeItem(STORAGE_KEY_SETTINGS);
-    
-    // Clear auto-save refs
-    lastSavedFilesRef.current = '';
-    lastSavedCodeRef.current = '';
-    
-    addDiagnostic('Workspace cleared.', 'info');
-  };
-
-  const handleAiAnalyze = async () => {
+  const handleAiAudit = async () => {
     if (!bundledCode) {
-      addDiagnostic('Please bundle files before running AI analysis.', 'warning');
+      addDiagnostic("Bundle your code first before auditing.", "warning");
       return;
     }
     setActiveAiTab('analysis');
     setIsAiLoading(true);
     try {
-      const result = await analyzeBundleWithGemini(bundledCode);
-      setAiAnalysis(result);
-      addDiagnostic('AI Analysis completed.', 'info');
-    } catch (error) {
-      addDiagnostic('AI Analysis failed. Check API configuration.', 'error');
-      setAiAnalysis('Analysis failed. Please ensure the API Key is configured correctly in the environment.');
+      const analysis = await analyzeBundleWithGemini(bundledCode);
+      setAiAnalysis(analysis);
+      addDiagnostic("AI code audit complete.");
+    } catch (e) {
+      addDiagnostic(`Audit failed: ${(e as Error).message}`, 'error');
     } finally {
       setIsAiLoading(false);
     }
@@ -621,544 +380,316 @@ const BundleBlitz: React.FC = () => {
 
   const handleAiLint = async () => {
     if (!bundledCode) {
-      addDiagnostic('Please bundle files before running AI Linter.', 'warning');
+      addDiagnostic("Bundle your code first before linting.", "warning");
       return;
     }
     setActiveAiTab('lint');
     setIsLintLoading(true);
-    setSelectedLintIssue(null);
     try {
       const issues = await lintBundleWithGemini(bundledCode);
       setLintIssues(issues);
-      addDiagnostic(`AI Linting completed. Found ${issues.length} issues.`, 'info');
-    } catch (error) {
-      addDiagnostic('AI Linting failed. Check API configuration.', 'error');
+      addDiagnostic(`AI linting complete. Found ${issues.length} issues.`);
+    } catch (e) {
+      addDiagnostic(`Linting failed: ${(e as Error).message}`, 'error');
     } finally {
       setIsLintLoading(false);
     }
   };
 
-  const handleAiRefactor = async () => {
+  const handleAiDiscover = async () => {
     if (!bundledCode) {
-      addDiagnostic('Please bundle files before running AI Refactoring.', 'warning');
+      addDiagnostic("Bundle your code first before scanning.", "warning");
       return;
     }
-    setActiveAiTab('refactor');
-    setIsRefactoring(true);
+    setActiveAiTab('discover');
+    setIsDiscovering(true);
     try {
-      const result = await refactorBundleWithGemini(bundledCode, refactorInstruction);
-      setRefactoredCode(result);
-      addDiagnostic('AI Refactoring completed. Check the diff view.', 'info');
-    } catch (error) {
-      addDiagnostic('AI Refactoring failed. Check API configuration.', 'error');
+      const components = await discoverComponentsWithGemini(bundledCode);
+      setDiscoveredComponents(components);
+      addDiagnostic(`Component discovery complete. Identified ${components.length} components.`);
+    } catch (e) {
+      addDiagnostic(`Discovery failed: ${(e as Error).message}`, 'error');
     } finally {
-      setIsRefactoring(false);
+      setIsDiscovering(false);
     }
   };
 
-  const handleApplyRefactor = () => {
-    if (!refactoredCode) return;
-    setBundledCode(refactoredCode);
-    setRefactoredCode('');
-    // Save to storage
-    localStorage.setItem(STORAGE_KEY_CODE, refactoredCode);
-    lastSavedCodeRef.current = refactoredCode;
-    addDiagnostic('Refactored code applied successfully.', 'info');
-    setActiveAiTab('analysis'); // Reset tab or go to editor
+  const handleRemoveFile = (id: string) => {
+    setFiles(prev => prev.filter(f => f.id !== id));
   };
-
-  const stats: BundleStats = {
-    fileCount: files.length,
-    totalSize: files.reduce((acc, f) => acc + f.size, 0),
-    linesOfCode: bundledCode.split('\n').length
-  };
-
-  const activePath = location.pathname;
 
   return (
-    <div className="min-h-screen pb-20 relative overflow-hidden">
-      {/* Background Decor */}
+    <div className="min-h-screen pb-20 relative overflow-hidden font-sans">
       <div className="fixed top-0 left-0 w-full h-full pointer-events-none z-0">
          <div className="absolute top-[-10%] left-[-10%] w-[40%] h-[40%] bg-neon-cyan/5 rounded-full blur-[100px]" />
          <div className="absolute bottom-[-10%] right-[-10%] w-[40%] h-[40%] bg-neon-magenta/5 rounded-full blur-[100px]" />
       </div>
 
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-        {/* Header */}
         <header className="mb-10 flex flex-col md:flex-row justify-between items-start md:items-end gap-6">
-          <div>
-            <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight mb-2 flex items-center gap-3">
-              <span className="text-transparent bg-clip-text bg-gradient-to-r from-neon-cyan to-neon-magenta animate-pulse-fast">
-                BundleBlitz
-              </span>
+          <div className="flex flex-col gap-2">
+            <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight flex items-center gap-3">
+              <span className="text-transparent bg-clip-text bg-gradient-to-r from-neon-cyan to-neon-magenta animate-pulse-fast">BundleBlitz</span>
               <Zap className="text-neon-cyan fill-current" size={40} />
             </h1>
-            <p className="text-gray-400 text-lg max-w-2xl">
-              High-performance single-file bundler. Drag a folder to create a static site instantly.
-            </p>
+            <p className="text-gray-400 text-lg">Instant playgrounds from your components.</p>
           </div>
-          
           <div className="flex gap-4">
-            <div className="bg-dark-card border border-white/10 px-4 py-2 rounded-lg text-sm">
-              <span className="block text-gray-500 text-xs uppercase font-bold">Files</span>
-              <span className="text-white font-mono text-xl">{stats.fileCount}</span>
-            </div>
-            <div className="bg-dark-card border border-white/10 px-4 py-2 rounded-lg text-sm">
-              <span className="block text-gray-500 text-xs uppercase font-bold">Size</span>
-              <span className="text-neon-cyan font-mono text-xl">
-                {(stats.totalSize / 1024).toFixed(2)} KB
-              </span>
-            </div>
+            <div className="bg-dark-card border border-white/10 px-4 py-2 rounded-lg text-sm text-white">Files: {files.length}</div>
           </div>
         </header>
 
-        {/* Main Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
-          {/* Left Column: Input & Controls */}
           <div className="lg:col-span-4 space-y-6">
             <DropZone onFilesSelected={handleFilesSelected} />
 
-            {/* File List */}
             {files.length > 0 && (
-              <div className="bg-dark-card border border-white/10 rounded-xl overflow-hidden">
-                <div className="p-4 border-b border-white/10 flex justify-between items-center">
-                  <h3 className="font-bold text-gray-200">Selected Files</h3>
-                  <span className="text-xs text-gray-500 font-mono">{files.length} items</span>
+              <div className="bg-dark-card border border-white/10 rounded-xl overflow-hidden flex flex-col max-h-[300px] shadow-2xl">
+                <div className="p-4 border-b border-white/10 bg-white/5 flex justify-between items-center">
+                  <h3 className="text-xs font-bold text-gray-300 uppercase tracking-widest flex items-center gap-2">
+                    <Braces size={14} className="text-neon-cyan" /> Workspace Assets
+                  </h3>
                 </div>
-                <div className="max-h-60 overflow-y-auto custom-scrollbar">
-                  {files.map((f, i) => {
-                    const { Icon, color, bg, label } = getFileTypeInfo(f.name);
+                <div className="flex-1 overflow-y-auto custom-scrollbar">
+                  {files.map((file) => {
+                    const { Icon, color, bg } = getFileTypeInfo(file.name);
                     return (
-                      <div key={f.id} className="px-4 py-3 border-b border-white/5 flex justify-between items-center hover:bg-white/5 transition-colors group">
-                        <div className="flex items-center gap-3 overflow-hidden">
+                      <div key={file.id} className="group flex items-center justify-between p-3 border-b border-white/5 hover:bg-white/10 transition-all">
+                        <div className="flex items-center gap-3 min-w-0">
                           <div className={`p-2 rounded-lg ${bg} ${color} shrink-0`}>
-                            <Icon size={18} />
+                            <Icon size={16} />
                           </div>
-                          <div className="flex flex-col min-w-0">
-                             <span className="text-sm text-gray-200 font-medium truncate group-hover:text-white transition-colors">{f.name}</span>
-                             <span className="text-[10px] text-gray-500 font-mono uppercase tracking-wider">{label}</span>
-                          </div>
+                          <span className="text-sm text-gray-200 font-medium truncate">{file.name}</span>
                         </div>
-                        <span className="text-xs text-gray-500 font-mono shrink-0">{(f.size / 1024).toFixed(1)}KB</span>
+                        <button onClick={() => handleRemoveFile(file.id)} className="opacity-0 group-hover:opacity-100 p-1.5 hover:text-red-400 rounded-md">
+                          <Trash2 size={14} />
+                        </button>
                       </div>
                     );
                   })}
                 </div>
-                <div className="p-4 bg-white/5 flex flex-col gap-3">
-                  
-                  {/* Build Configuration */}
-                  <div className="mb-2 px-1">
-                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3">Build Configuration</h4>
-                    <div className="space-y-3">
-                      
-                      {/* Bundle Type Toggle */}
-                      <div className="flex bg-gray-800 rounded-lg p-1 border border-white/10 mb-4">
-                        <button
-                          onClick={() => setBundleType('JS')}
-                          className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-bold transition-all ${bundleType === 'JS' ? 'bg-white/10 text-white shadow' : 'text-gray-400 hover:text-white'}`}
-                        >
-                           <FileCode2 size={14} /> JS Bundle
-                        </button>
-                        <button
-                          onClick={() => setBundleType('HTML')}
-                          className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded-md text-xs font-bold transition-all ${bundleType === 'HTML' ? 'bg-orange-500/20 text-orange-400 shadow border border-orange-500/30' : 'text-gray-400 hover:text-white'}`}
-                        >
-                           <LayoutTemplate size={14} /> HTML Bundle
-                        </button>
-                      </div>
-
-                      {bundleType === 'JS' && (
-                        <>
-                          {/* Transpilation Toggle */}
-                          <label className="flex items-center gap-3 cursor-pointer group select-none">
-                            <div className="relative">
-                              <input 
-                                type="checkbox" 
-                                checked={enableTranspilation}
-                                onChange={(e) => setEnableTranspilation(e.target.checked)}
-                                className="sr-only peer" 
-                              />
-                              <div className="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-neon-cyan"></div>
-                            </div>
-                            <span className="text-sm text-gray-300 flex items-center gap-2 group-hover:text-white transition-colors">
-                              <Settings size={16} className="text-neon-cyan" />
-                              <div>
-                                <span className="block font-medium">Transpile to ES5</span>
-                                <span className="block text-xs text-gray-500">Use Babel for compatibility</span>
-                              </div>
-                            </span>
-                          </label>
-
-                          {/* Formatting Toggle */}
-                          <label className="flex items-center gap-3 cursor-pointer group select-none">
-                            <div className="relative">
-                              <input 
-                                type="checkbox" 
-                                checked={enableFormatting}
-                                onChange={(e) => setEnableFormatting(e.target.checked)}
-                                className="sr-only peer" 
-                              />
-                              <div className="w-11 h-6 bg-gray-700 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-neon-magenta"></div>
-                            </div>
-                            <span className="text-sm text-gray-300 flex items-center gap-2 group-hover:text-white transition-colors">
-                              <AlignLeft size={16} className="text-neon-magenta" />
-                              <div>
-                                <span className="block font-medium">Format Code (Prettier)</span>
-                                <span className="block text-xs text-gray-500">Format JS output</span>
-                              </div>
-                            </span>
-                          </label>
-                        </>
-                      )}
-                      
-                      {bundleType === 'HTML' && (
-                        <div className="p-3 bg-orange-500/5 border border-orange-500/20 rounded-lg">
-                          <p className="text-xs text-orange-300 flex items-start gap-2">
-                            <InfoIcon size={14} className="mt-0.5 shrink-0" />
-                            Generates a single index.html file with all CSS and JS inlined.
-                          </p>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                  
-                  <div className="border-t border-white/10 my-1"></div>
-
-                  <button
-                    onClick={handleBundle}
-                    disabled={isProcessing || files.length === 0}
-                    className="w-full py-3 rounded-lg bg-gradient-to-r from-neon-cyan to-neon-purple text-dark-bg font-bold hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 shadow-lg shadow-neon-cyan/20"
-                  >
-                    {isProcessing ? <Activity className="animate-spin" size={20} /> : <Zap size={20} />}
-                    {bundleType === 'HTML' ? 'Generate HTML' : 'Bundle Files'}
-                  </button>
-                  <button
-                    onClick={handleClear}
-                    className="w-full py-3 rounded-lg border border-white/10 text-gray-400 hover:text-white hover:border-white/30 transition-all flex items-center justify-center gap-2"
-                  >
-                    <Trash2 size={18} />
-                    Clear Workspace
-                  </button>
-                </div>
               </div>
             )}
 
-            <DiagnosticPanel diagnostics={diagnostics} onDismiss={(id) => setDiagnostics(prev => prev.filter(d => d.id !== id))} />
+            {files.length > 0 && (
+              <div className="bg-dark-card border border-white/10 rounded-xl overflow-hidden p-4">
+                 <div className="space-y-3 mb-6">
+                    <div className="flex bg-gray-800 rounded-lg p-1">
+                      <button onClick={()=>setBundleType('JS')} className={`flex-1 py-1.5 rounded-md text-xs font-bold ${bundleType==='JS'?'bg-white/10 text-white':'text-gray-400'}`}>JS</button>
+                      <button onClick={()=>setBundleType('HTML')} className={`flex-1 py-1.5 rounded-md text-xs font-bold ${bundleType==='HTML'?'bg-orange-500/20 text-orange-400':'text-gray-400'}`}>HTML</button>
+                    </div>
+                    <label className="flex items-center gap-3 cursor-pointer group">
+                      <input type="checkbox" className="accent-neon-cyan" checked={enableTranspilation} onChange={e=>setEnableTranspilation(e.target.checked)} />
+                      <span className="text-xs text-gray-300">Transpile (Babel)</span>
+                    </label>
+                 </div>
+                 <button onClick={handleBundle} disabled={isProcessing} className="w-full py-3 bg-gradient-to-r from-neon-cyan to-neon-purple rounded-lg text-dark-bg font-bold flex items-center justify-center gap-2 hover:brightness-110 active:scale-[0.98] transition-all disabled:opacity-50 shadow-[0_0_20px_rgba(0,250,255,0.2)]">
+                    {isProcessing ? <Activity className="animate-spin" size={18} /> : <Zap size={18} />} 
+                    Bundle Code
+                 </button>
+              </div>
+            )}
+            <DiagnosticPanel diagnostics={diagnostics} onDismiss={id=>setDiagnostics(prev=>prev.filter(d=>d.id!==id))} />
           </div>
 
-          {/* Right Column: Output & Tools */}
           <div className="lg:col-span-8 flex flex-col gap-6">
-            {/* Tabs */}
-            <div className="flex items-center gap-2 p-1 bg-dark-card border border-white/10 rounded-xl w-fit">
+            <nav className="flex items-center gap-2 p-1 bg-dark-card border border-white/10 rounded-xl w-fit shadow-xl">
               {[
-                { path: '/editor', label: 'Code Editor', icon: Code },
-                { path: '/visualizer', label: 'Visualizer', icon: LayoutTemplate },
+                { path: '/editor', label: 'Code', icon: Code },
+                { path: '/visualizer', label: 'Stats', icon: LayoutTemplate },
                 { path: '/ai-insights', label: 'AI Insights', icon: Sparkles },
-                { path: '/preview', label: 'Live Preview', icon: Play },
+                { path: '/playground', label: 'Playground', icon: Boxes },
+                { path: '/preview', label: 'Preview', icon: Play },
               ].map(tab => (
-                <Link
-                  key={tab.path}
-                  to={tab.path}
-                  className={`
-                    flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all
-                    ${activePath === tab.path 
-                      ? 'bg-white/10 text-neon-cyan shadow-sm' 
-                      : 'text-gray-400 hover:text-white hover:bg-white/5'}
-                  `}
-                >
-                  <tab.icon size={16} />
-                  {tab.label}
+                <Link key={tab.path} to={tab.path} className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${location.pathname===tab.path?'bg-white/10 text-neon-cyan shadow-neon-cyan/10':'text-gray-400 hover:text-white'}`}>
+                  <tab.icon size={16} />{tab.label}
                 </Link>
               ))}
-            </div>
+            </nav>
 
-            {/* Content Area */}
-            <div className="flex-1 min-h-[500px] bg-dark-card border border-white/10 rounded-xl overflow-hidden relative shadow-2xl">
+            <div className="flex-1 min-h-[600px] bg-dark-card border border-white/10 rounded-xl overflow-hidden relative shadow-2xl flex flex-col">
               <Routes>
                 <Route path="/" element={<Navigate to="/editor" replace />} />
-                
-                {/* Editor View */}
                 <Route path="/editor" element={
-                  <div className="h-full flex flex-col">
-                    <div className="flex justify-between items-center p-4 border-b border-white/10 bg-white/5">
-                      <span className="text-gray-400 text-sm font-mono flex items-center gap-2">
-                        {bundleType === 'HTML' ? 'index.html' : 'bundle.js'}
-                        {enableTranspilation && bundleType === 'JS' && <span className="text-xs bg-neon-cyan/10 text-neon-cyan px-2 py-0.5 rounded border border-neon-cyan/20">ES5</span>}
-                        {enableFormatting && bundleType === 'JS' && <span className="text-xs bg-neon-magenta/10 text-neon-magenta px-2 py-0.5 rounded border border-neon-magenta/20">Prettier</span>}
-                      </span>
-                      <div className="flex gap-2">
+                  <div className="flex-1 flex flex-col relative">
+                    {bundledCode && (
+                      <div className="absolute top-4 right-4 z-10 flex gap-2">
+                        <button onClick={handleCopy} className="p-2 bg-dark-bg/80 border border-white/10 rounded-lg text-gray-400 hover:text-neon-cyan transition-colors">
+                          {isCopied ? <Check size={18} className="text-green-400" /> : <Copy size={18} />}
+                        </button>
+                      </div>
+                    )}
+                    <textarea value={bundledCode} readOnly className="flex-1 w-full h-full bg-dark-bg p-6 font-mono text-sm text-gray-300 focus:outline-none resize-none leading-relaxed custom-scrollbar" placeholder="// Bundle your workspace to see output..." />
+                  </div>
+                } />
+                <Route path="/visualizer" element={<Visualizer files={files} />} />
+                <Route path="/playground" element={<Playground files={files} bundledCode={bundledCode} components={discoveredComponents} />} />
+                <Route path="/ai-insights" element={
+                  <div className="flex flex-col h-full">
+                    <div className="p-6 bg-white/[0.02] border-b border-white/10">
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                        <div className="space-y-1">
+                          <h2 className="text-lg font-bold text-white flex items-center gap-2">
+                            <Cpu size={20} className="text-neon-cyan" />
+                            AI Insight Dashboard
+                          </h2>
+                          <p className="text-xs text-gray-400">Gemini-powered code analysis and real-time intelligence.</p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button 
+                            onClick={handleAiAudit} 
+                            disabled={isAiLoading}
+                            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-all ${isAiLoading ? 'bg-white/5 text-gray-500' : 'bg-neon-purple/20 text-neon-purple border border-neon-purple/30 hover:bg-neon-purple hover:text-white'}`}
+                          >
+                            {isAiLoading ? <Activity size={14} className="animate-spin" /> : <ShieldCheck size={14} />}
+                            Audit Code
+                          </button>
+                          <button 
+                            onClick={handleAiLint} 
+                            disabled={isLintLoading}
+                            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-all ${isLintLoading ? 'bg-white/5 text-gray-500' : 'bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/30 hover:bg-neon-cyan hover:text-white'}`}
+                          >
+                            {isLintLoading ? <Activity size={14} className="animate-spin" /> : <Bug size={14} />}
+                            AI Linter
+                          </button>
+                          <button 
+                            onClick={handleAiDiscover} 
+                            disabled={isDiscovering}
+                            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-2 transition-all ${isDiscovering ? 'bg-white/5 text-gray-500' : 'bg-neon-magenta/20 text-neon-magenta border border-neon-magenta/30 hover:bg-neon-magenta hover:text-white'}`}
+                          >
+                            {isDiscovering ? <Activity size={14} className="animate-spin" /> : <SearchCode size={14} />}
+                            Scan Components
+                          </button>
+                        </div>
+                      </div>
+                      <div className="mt-8 flex gap-4 border-b border-white/5 overflow-x-auto">
                         <button 
-                          onClick={handleCopy}
-                          disabled={!bundledCode}
-                          className="p-2 hover:bg-white/10 rounded-lg text-gray-400 hover:text-neon-cyan transition-colors disabled:opacity-50"
-                          title="Copy Code"
+                          onClick={() => setActiveAiTab('analysis')}
+                          className={`pb-3 text-xs font-bold transition-all px-2 ${activeAiTab === 'analysis' ? 'text-neon-purple border-b-2 border-neon-purple' : 'text-gray-500 hover:text-white'}`}
                         >
-                          <Copy size={18} />
+                          Combined Report
                         </button>
                         <button 
-                          onClick={handleDownload}
-                          disabled={!bundledCode}
-                          className="p-2 hover:bg-white/10 rounded-lg text-gray-400 hover:text-neon-cyan transition-colors disabled:opacity-50"
-                          title="Download Bundle"
+                          onClick={() => setActiveAiTab('discover')}
+                          className={`pb-3 text-xs font-bold transition-all px-2 ${activeAiTab === 'discover' ? 'text-neon-magenta border-b-2 border-neon-magenta' : 'text-gray-500 hover:text-white'}`}
                         >
-                          <Download size={18} />
+                          UI Registry ({discoveredComponents.length})
                         </button>
                       </div>
                     </div>
-                    <textarea 
-                      value={bundledCode} 
-                      readOnly 
-                      placeholder="// Bundled code will appear here..."
-                      className="flex-1 w-full bg-dark-bg p-4 font-mono text-sm text-gray-300 focus:outline-none resize-none"
-                    />
-                  </div>
-                } />
 
-                {/* Visualizer View */}
-                <Route path="/visualizer" element={
-                  <div className="h-full p-6 overflow-y-auto">
-                    <Visualizer files={files} />
-                  </div>
-                } />
+                    <div className="flex-1 p-6 overflow-y-auto custom-scrollbar bg-dark-bg/20">
+                      {activeAiTab === 'analysis' && (
+                        <div className="space-y-8 h-full">
+                          {!aiAnalysis && lintIssues.length === 0 && !isAiLoading && !isLintLoading && (
+                            <div className="h-full flex flex-col items-center justify-center text-center gap-6 opacity-40 py-20">
+                              <Sparkles size={64} className="text-gray-600 animate-pulse" />
+                              <div className="space-y-2">
+                                <h3 className="text-xl font-bold text-white">No Insight Data Yet</h3>
+                                <p className="text-sm max-w-sm mx-auto">Click "Audit" or "Lint" in the dashboard above to start the intelligence engine.</p>
+                              </div>
+                            </div>
+                          )}
 
-                {/* AI Insights View */}
-                <Route path="/ai-insights" element={
-                  <div className="h-full p-6 flex flex-col">
-                    {!bundledCode ? (
-                      <div className="flex-1 flex flex-col items-center justify-center text-gray-500 gap-4">
-                         <Code size={48} className="opacity-20" />
-                         <p>Bundle your files first to enable AI analysis.</p>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="flex justify-between items-center mb-6">
-                          <div className="flex items-center gap-4">
-                             <h3 className="text-xl font-bold text-white flex items-center gap-2">
-                               <Sparkles size={20} className="text-neon-purple" />
-                               AI Insights
-                             </h3>
-                             <div className="flex bg-white/5 rounded-lg p-1 border border-white/10">
-                                <button
-                                  onClick={() => setActiveAiTab('analysis')}
-                                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${activeAiTab === 'analysis' ? 'bg-neon-purple text-white shadow' : 'text-gray-400 hover:text-white'}`}
-                                >
-                                  Deep Analysis
-                                </button>
-                                <button
-                                  onClick={() => setActiveAiTab('lint')}
-                                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${activeAiTab === 'lint' ? 'bg-neon-cyan text-dark-bg shadow' : 'text-gray-400 hover:text-white'}`}
-                                >
-                                  Smart Linter
-                                </button>
-                                <button
-                                  onClick={() => setActiveAiTab('refactor')}
-                                  className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all ${activeAiTab === 'refactor' ? 'bg-green-500 text-white shadow' : 'text-gray-400 hover:text-white'}`}
-                                >
-                                  Auto-Refactor
-                                </button>
-                             </div>
-                          </div>
-                          
-                          {activeAiTab === 'analysis' ? (
-                            <button
-                              onClick={handleAiAnalyze}
-                              disabled={isAiLoading}
-                              className="px-4 py-2 bg-neon-purple/20 text-neon-purple border border-neon-purple/50 rounded-lg hover:bg-neon-purple/30 transition-all flex items-center gap-2 text-sm font-bold"
-                            >
-                              {isAiLoading ? <Activity className="animate-spin" size={16} /> : <Sparkles size={16} />}
-                              {aiAnalysis ? 'Re-Analyze' : 'Run Analysis'}
-                            </button>
-                          ) : activeAiTab === 'lint' ? (
-                            <button
-                              onClick={handleAiLint}
-                              disabled={isLintLoading}
-                              className="px-4 py-2 bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/50 rounded-lg hover:bg-neon-cyan/30 transition-all flex items-center gap-2 text-sm font-bold"
-                            >
-                              {isLintLoading ? <Activity className="animate-spin" size={16} /> : <Bug size={16} />}
-                              {lintIssues.length > 0 ? 'Re-Lint' : 'Run Linter'}
-                            </button>
-                          ) : (
-                             // Refactor Tab Controls
-                             <div className="flex gap-2">
-                               <button
-                                onClick={handleAiRefactor}
-                                disabled={isRefactoring}
-                                className="px-4 py-2 bg-green-500/20 text-green-400 border border-green-500/50 rounded-lg hover:bg-green-500/30 transition-all flex items-center gap-2 text-sm font-bold"
-                              >
-                                {isRefactoring ? <Activity className="animate-spin" size={16} /> : <RotateCw size={16} />}
-                                {refactoredCode ? 'Regenerate' : 'Refactor Code'}
-                              </button>
-                              {refactoredCode && (
-                                <button
-                                  onClick={handleApplyRefactor}
-                                  className="px-4 py-2 bg-white/10 text-white border border-white/20 rounded-lg hover:bg-white/20 transition-all flex items-center gap-2 text-sm font-bold"
-                                >
-                                  <Check size={16} /> Apply Changes
-                                </button>
-                              )}
-                             </div>
+                          {lintIssues.length > 0 && (
+                            <section className="space-y-4">
+                              <div className="flex items-center gap-2 mb-4">
+                                <Bug size={18} className="text-neon-cyan" />
+                                <h3 className="text-sm font-extrabold uppercase tracking-widest text-white">Linting Analysis</h3>
+                              </div>
+                              <div className="grid grid-cols-1 gap-3">
+                                {lintIssues.map((issue, idx) => (
+                                  <div key={idx} className={`p-4 rounded-xl border flex gap-4 transition-all hover:scale-[1.01] ${issue.severity === 'error' ? 'bg-red-500/5 border-red-500/20' : 'bg-yellow-500/5 border-yellow-500/20'}`}>
+                                    <div className="mt-1">
+                                      {issue.severity === 'error' ? <AlertCircle size={18} className="text-red-500" /> : <AlertTriangle size={18} className="text-yellow-500" />}
+                                    </div>
+                                    <div className="flex-1 space-y-2">
+                                      <div className="flex items-center gap-3">
+                                        <span className={`text-[10px] font-bold uppercase tracking-widest ${issue.severity === 'error' ? 'text-red-400' : 'text-yellow-400'}`}>
+                                          {issue.severity}
+                                        </span>
+                                        {issue.line && <span className="text-[10px] text-gray-500 font-mono bg-white/5 px-2 py-0.5 rounded">Line {issue.line}</span>}
+                                      </div>
+                                      <p className="text-sm text-gray-200 leading-relaxed">{issue.message}</p>
+                                      {issue.suggestion && (
+                                        <div className="text-xs text-gray-400 bg-black/40 p-3 rounded-lg border border-white/5">
+                                          <div className="flex items-center gap-2 text-neon-cyan font-bold mb-1">
+                                            <Sparkles size={12} />
+                                            AI Suggestion
+                                          </div>
+                                          {issue.suggestion}
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            </section>
+                          )}
+
+                          {renderedAnalysis && (
+                            <section className="space-y-4 pt-6 border-t border-white/10">
+                              <div className="flex items-center gap-2 mb-4">
+                                <ShieldCheck size={18} className="text-neon-purple" />
+                                <h3 className="text-sm font-extrabold uppercase tracking-widest text-white">Architectural Audit</h3>
+                              </div>
+                              <div className="bg-white/5 p-6 rounded-2xl border border-white/10 shadow-inner">
+                                <div className="prose prose-invert prose-sm max-w-none prose-headings:text-neon-purple prose-strong:text-neon-magenta prose-code:text-neon-cyan prose-a:text-neon-cyan" dangerouslySetInnerHTML={{ __html: renderedAnalysis }} />
+                              </div>
+                            </section>
                           )}
                         </div>
-                        
-                        <div className="flex-1 bg-dark-bg/50 rounded-xl border border-white/5 overflow-hidden relative">
-                          {activeAiTab === 'analysis' ? (
-                            <div className="p-6 h-full overflow-y-auto custom-scrollbar">
-                              {isAiLoading ? (
-                                <div className="space-y-4 animate-pulse">
-                                  <div className="h-4 bg-white/10 rounded w-3/4"></div>
-                                  <div className="h-4 bg-white/10 rounded w-1/2"></div>
-                                  <div className="h-4 bg-white/10 rounded w-5/6"></div>
-                                  <div className="text-center pt-8 text-gray-500 text-sm animate-pulse">Analyzing bundle with Gemini...</div>
-                                </div>
-                              ) : aiAnalysis ? (
-                                <div 
-                                  className="prose prose-invert prose-sm max-w-none font-sans text-gray-300 leading-relaxed prose-headings:text-neon-cyan prose-a:text-neon-magenta"
-                                  dangerouslySetInnerHTML={{ __html: renderedAnalysis }}
-                                />
-                              ) : (
-                                <div className="flex flex-col items-center justify-center h-full text-gray-500 italic text-center">
-                                  <Sparkles size={40} className="mb-4 opacity-20" />
-                                  <p>Click "Run Analysis" to check for security risks, <br/> bad practices, performance, and code modularity.</p>
-                                </div>
-                              )}
-                            </div>
-                          ) : activeAiTab === 'lint' ? (
-                            <div className="h-full flex flex-col">
-                               {isLintLoading ? (
-                                <div className="p-6 space-y-4 animate-pulse">
-                                  <div className="h-10 bg-white/10 rounded w-full"></div>
-                                  <div className="h-10 bg-white/10 rounded w-full"></div>
-                                  <div className="h-10 bg-white/10 rounded w-full"></div>
-                                  <div className="text-center pt-8 text-gray-500 text-sm animate-pulse">Linting code with Gemini...</div>
-                                </div>
-                              ) : lintIssues.length > 0 ? (
-                                <div className="flex h-full">
-                                  {/* Left Pane: Issue List */}
-                                  <div className="w-1/3 border-r border-white/10 overflow-y-auto custom-scrollbar bg-dark-card/50">
-                                    <table className="w-full text-left text-sm text-gray-400">
-                                      <thead className="bg-white/5 text-gray-200 sticky top-0 backdrop-blur-sm z-10">
-                                        <tr>
-                                          <th className="p-3 font-semibold text-xs uppercase">Issues ({lintIssues.length})</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody className="divide-y divide-white/5">
-                                        {lintIssues.map((issue, idx) => (
-                                          <tr 
-                                            key={idx} 
-                                            onClick={() => setSelectedLintIssue(idx)}
-                                            className={`cursor-pointer transition-colors ${selectedLintIssue === idx ? 'bg-white/10' : 'hover:bg-white/5'}`}
-                                          >
-                                            <td className="p-3">
-                                              <div className="flex items-center justify-between mb-1">
-                                                {issue.severity === 'error' ? (
-                                                  <span className="inline-flex items-center gap-1 text-red-400 text-xs font-bold uppercase">
-                                                    <AlertTriangle size={10} /> Error
-                                                  </span>
-                                                ) : issue.severity === 'warning' ? (
-                                                  <span className="inline-flex items-center gap-1 text-yellow-400 text-xs font-bold uppercase">
-                                                    <AlertTriangle size={10} /> Warn
-                                                  </span>
-                                                ) : (
-                                                  <span className="inline-flex items-center gap-1 text-blue-400 text-xs font-bold uppercase">
-                                                    <InfoIcon size={10} /> Info
-                                                  </span>
-                                                )}
-                                                <span className="font-mono text-xs text-gray-600">L{issue.line || '?'}</span>
-                                              </div>
-                                              <div className="text-gray-300 line-clamp-2 text-xs mb-1">{issue.message}</div>
-                                              {issue.suggestion && (
-                                                <div className="text-neon-cyan/60 italic text-[10px] line-clamp-1">Tip: {issue.suggestion}</div>
-                                              )}
-                                            </td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
+                      )}
+
+                      {activeAiTab === 'discover' && (
+                        <div className="h-full">
+                          {discoveredComponents.length > 0 ? (
+                            <div className="space-y-6">
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {discoveredComponents.map((comp, idx) => (
+                                  <div key={idx} className="bg-white/5 border border-white/10 p-5 rounded-2xl hover:border-neon-magenta/50 transition-all group relative overflow-hidden">
+                                    <div className="absolute top-0 right-0 w-24 h-24 bg-neon-magenta/5 rounded-full blur-3xl -mr-12 -mt-12 group-hover:bg-neon-magenta/20 transition-all"></div>
+                                    <div className="flex justify-between items-start mb-3 relative z-10">
+                                      <h5 className="font-mono text-neon-magenta font-bold flex items-center gap-2">
+                                        <Boxes size={16} />
+                                        {comp.name}
+                                      </h5>
+                                    </div>
+                                    <p className="text-xs text-gray-400 line-clamp-2 mb-6 h-8">{comp.description || 'UI Component found in source.'}</p>
+                                    <div className="flex flex-wrap gap-1 relative z-10">
+                                      {comp.props.slice(0, 4).map(p => (
+                                        <span key={p.name} className="text-[9px] bg-black/40 px-2 py-1 rounded text-gray-500 border border-white/5 flex items-center gap-1">
+                                          <div className={`w-1 h-1 rounded-full ${p.type === 'string' ? 'bg-blue-400' : p.type === 'number' ? 'bg-green-400' : 'bg-neon-magenta'}`}></div>
+                                          {p.name}
+                                        </span>
+                                      ))}
+                                      {comp.props.length > 4 && <span className="text-[9px] text-gray-600 px-2 py-1">+{comp.props.length - 4} more</span>}
+                                    </div>
                                   </div>
-                                  {/* Right Pane: Annotated Code View */}
-                                  <div className="flex-1 h-full overflow-hidden bg-[#1d1f21] relative">
-                                    <AnnotatedCodeView 
-                                      code={bundledCode} 
-                                      issues={lintIssues} 
-                                      selectedIssueIndex={selectedLintIssue} 
-                                    />
-                                  </div>
-                                </div>
-                              ) : (
-                                <div className="flex flex-col items-center justify-center h-full text-gray-500 italic text-center p-6">
-                                  <Bug size={40} className="mb-4 opacity-20" />
-                                  <p>Click "Run Linter" to check for syntax errors, <br/> bugs, and bad practices.</p>
-                                  {lintIssues.length === 0 && !isLintLoading && activeAiTab === 'lint' && (
-                                    <p className="mt-2 text-green-500/50 text-xs font-bold flex items-center gap-1 justify-center">
-                                      <Check size={14} /> No issues found! Clean code.
-                                    </p>
-                                  )}
-                                </div>
-                              )}
+                                ))}
+                              </div>
+                              <div className="flex gap-4">
+                                <Link to="/playground" className="flex-1 py-4 bg-gradient-to-r from-neon-magenta to-neon-purple text-white font-bold rounded-xl text-center hover:brightness-110 transition-all shadow-xl shadow-neon-magenta/20 flex items-center justify-center gap-2">
+                                  <Boxes size={18} />
+                                  Open Interactive Playground
+                                </Link>
+                              </div>
                             </div>
                           ) : (
-                             // Refactor Tab Content
-                             <div className="h-full flex flex-col p-4">
-                               {!refactoredCode ? (
-                                 <div className="flex flex-col items-center justify-center h-full gap-4">
-                                   <div className="w-full max-w-lg space-y-3">
-                                      <label className="text-sm text-gray-400 font-bold uppercase tracking-wider">Refactoring Instructions</label>
-                                      <textarea 
-                                        className="w-full bg-dark-card border border-white/10 rounded-lg p-3 text-gray-300 focus:outline-none focus:border-neon-cyan transition-colors h-32"
-                                        placeholder="E.g., 'Convert to ES6 classes', 'Optimize loops', 'Remove unused variables', or 'Clean up this mess!'"
-                                        value={refactorInstruction}
-                                        onChange={(e) => setRefactorInstruction(e.target.value)}
-                                      />
-                                      <button
-                                        onClick={handleAiRefactor}
-                                        disabled={isRefactoring}
-                                        className="w-full py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors font-bold flex items-center justify-center gap-2"
-                                      >
-                                        {isRefactoring ? <Activity className="animate-spin" /> : <RotateCw />}
-                                        Start Refactoring
-                                      </button>
-                                   </div>
-                                 </div>
-                               ) : (
-                                 <div className="h-full flex flex-col">
-                                    <div className="flex justify-between items-center mb-2 px-2">
-                                       <div className="flex items-center gap-2 text-gray-400 text-sm">
-                                         <GitCompare size={16} />
-                                         <span>Diff View: Original vs. Refactored</span>
-                                       </div>
-                                    </div>
-                                    <div className="flex-1 overflow-hidden">
-                                       <DiffView original={bundledCode} modified={refactoredCode} />
-                                    </div>
-                                 </div>
-                               )}
-                             </div>
+                            <div className="h-full flex flex-col items-center justify-center text-center gap-6 opacity-40 py-20">
+                              <Boxes size={64} className="text-gray-600" />
+                              <div className="space-y-2">
+                                <h3 className="text-xl font-bold text-white">Component Registry Empty</h3>
+                                <p className="text-sm max-w-xs mx-auto">Run "Scan Components" to detect exports and automatically build playgrounds.</p>
+                              </div>
+                            </div>
                           )}
                         </div>
-                      </>
-                    )}
+                      )}
+                    </div>
                   </div>
                 } />
-
-                {/* Preview View */}
-                <Route path="/preview" element={
-                  <div className="h-full w-full bg-white rounded-xl overflow-hidden relative">
-                    {files.length === 0 ? (
-                      <div className="h-full flex flex-col items-center justify-center text-gray-500 gap-4 bg-dark-card border-none">
-                        <Play size={48} className="opacity-20" />
-                        <p>Add files to generate a live preview.</p>
-                      </div>
-                    ) : (
-                      <iframe 
-                        src={previewUrl || ''} 
-                        className="w-full h-full border-none bg-white"
-                        title="Live Preview"
-                        sandbox="allow-scripts allow-modals allow-same-origin"
-                      />
-                    )}
-                  </div>
-                } />
+                <Route path="/preview" element={<iframe src={previewUrl || ''} className="w-full h-full bg-white border-none" />} />
               </Routes>
             </div>
           </div>
@@ -1168,12 +699,21 @@ const BundleBlitz: React.FC = () => {
   );
 };
 
-const App: React.FC = () => {
-  return (
-    <HashRouter>
-      <BundleBlitz />
-    </HashRouter>
-  );
-};
+const router = createHashRouter([
+  {
+    path: "/*",
+    element: <BundleBlitz />,
+  },
+], {
+  future: {
+    v7_startTransition: true,
+    v7_relativeSplatPath: true,
+    v7_fetcherPersist: true,
+    v7_normalizeFormMethod: true,
+    v7_partialHydration: true,
+    v7_skipActionErrorRevalidation: true,
+  }
+});
 
+const App: React.FC = () => <RouterProvider router={router} />;
 export default App;

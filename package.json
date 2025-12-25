@@ -22,7 +22,8 @@
     "@remix-run/router": "1.21.0",
     "react-is": "18.3.1",
     "marked": "15.0.3",
-    "diff": "5.2.0"
+    "diff": "5.2.0",
+    "eslint": "latest"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

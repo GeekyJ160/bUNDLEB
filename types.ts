@@ -1,3 +1,4 @@
+
 export interface FileEntry {
   id: string;
   name: string;
@@ -23,7 +24,8 @@ export enum ViewMode {
   EDITOR = 'EDITOR',
   VISUALIZER = 'VISUALIZER',
   AI_INSIGHTS = 'AI_INSIGHTS',
-  PREVIEW = 'PREVIEW'
+  PREVIEW = 'PREVIEW',
+  PLAYGROUND = 'PLAYGROUND'
 }
 
 export interface LintIssue {
@@ -31,4 +33,18 @@ export interface LintIssue {
   severity: 'error' | 'warning' | 'info';
   message: string;
   suggestion?: string;
+}
+
+export interface PropDefinition {
+  name: string;
+  type: 'string' | 'number' | 'boolean' | 'enum';
+  options?: string[];
+  defaultValue: any;
+  description?: string;
+}
+
+export interface ComponentMetadata {
+  name: string;
+  description?: string;
+  props: PropDefinition[];
 }
