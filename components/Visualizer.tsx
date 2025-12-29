@@ -18,7 +18,9 @@ export const Visualizer: React.FC<VisualizerProps> = ({ files }) => {
     if (!containerRef.current) return;
     const resizeObserver = new ResizeObserver(entries => {
       for (let entry of entries) {
-        setContainerWidth(entry.contentRect.width);
+        if (entry.contentRect.width > 0) {
+          setContainerWidth(entry.contentRect.width);
+        }
       }
     });
     resizeObserver.observe(containerRef.current);
@@ -156,9 +158,9 @@ export const Visualizer: React.FC<VisualizerProps> = ({ files }) => {
           <span className="w-2 h-2 rounded-full bg-neon-magenta animate-pulse"></span>
           Size Distribution (Bytes)
         </h3>
-        {/* Fix: Added min-width: 0 and explicit container relative positioning to fix Recharts width(-1) warning */}
+        {/* Fix: Only render ResponsiveContainer when width > 0 to avoid -1 warning */}
         <div className="w-full min-w-0 h-[300px] relative">
-          {files.length > 0 ? (
+          {files.length > 0 && containerWidth > 0 ? (
             <ResponsiveContainer width="100%" height="100%" minHeight={300}>
               <BarChart data={chartData} layout="vertical" margin={{ top: 5, right: 30, left: 40, bottom: 5 }}>
                 <XAxis type="number" stroke="#6b7280" fontSize={10} />

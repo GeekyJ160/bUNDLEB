@@ -192,10 +192,13 @@ const MainApp: React.FC = () => {
       const htmlPlugin = await import('prettier/plugins/html');
       // @ts-ignore
       const postcssPlugin = await import('prettier/plugins/postcss');
+      // @ts-ignore
+      const typescriptPlugin = await import('prettier/plugins/typescript');
 
       const formatted = await prettier.format(code, {
-        parser: type === 'JS' ? 'babel' : 'html',
-        plugins: [babelPlugin, estreePlugin, htmlPlugin, postcssPlugin],
+        // Use typescript parser instead of babel to handle code containing TS types
+        parser: type === 'JS' ? 'typescript' : 'html',
+        plugins: [babelPlugin, estreePlugin, htmlPlugin, postcssPlugin, typescriptPlugin],
         semi: true,
         singleQuote: true,
         printWidth: 100,
@@ -287,9 +290,9 @@ const MainApp: React.FC = () => {
     addDiagnostic("File removed from workspace.", "info");
   };
 
-  const clearFiles = () => {
+  const clearWorkspace = () => {
     if (files.length === 0) return;
-    if (window.confirm("Are you sure you want to clear all tasks and files from the workspace?")) {
+    if (window.confirm("Permanently clear workspace? This will wipe all files, bundled code, and AI results.")) {
       setFiles([]);
       setBundledCode('');
       setAiAnalysis('');
@@ -479,15 +482,6 @@ const MainApp: React.FC = () => {
             </h3>
             <div className="flex items-center gap-2">
               <span className="text-[10px] bg-dark-bg px-2 py-0.5 rounded text-neon-cyan border border-neon-cyan/20">{files.length}</span>
-              {files.length > 0 && (
-                <button 
-                  onClick={clearFiles}
-                  className="p-1 hover:text-red-500 text-gray-600 transition-all"
-                  title="Clear All Files"
-                >
-                  <Trash2 size={12} />
-                </button>
-              )}
             </div>
           </div>
           
@@ -531,25 +525,35 @@ const MainApp: React.FC = () => {
                 Workspace is empty.
               </div>
             ) : (
-              files.map(file => {
-                const { Icon, color, bg, label } = getFileTypeInfo(file.name);
-                return (
-                  <div key={file.id} className="group flex items-center justify-between p-2 rounded-lg hover:bg-white/5 transition-all cursor-default">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className={`p-1.5 rounded ${bg} ${color}`}>
-                        <Icon size={14} />
+              <>
+                {files.map(file => {
+                  const { Icon, color, bg, label } = getFileTypeInfo(file.name);
+                  return (
+                    <div key={file.id} className="group flex items-center justify-between p-2 rounded-lg hover:bg-white/5 transition-all cursor-default">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className={`p-1.5 rounded ${bg} ${color}`}>
+                          <Icon size={14} />
+                        </div>
+                        <div className="flex flex-col min-w-0">
+                          <span className="text-xs font-medium truncate text-gray-300">{file.name}</span>
+                          <span className="text-[9px] text-gray-600">{label}</span>
+                        </div>
                       </div>
-                      <div className="flex flex-col min-w-0">
-                        <span className="text-xs font-medium truncate text-gray-300">{file.name}</span>
-                        <span className="text-[9px] text-gray-600">{label}</span>
-                      </div>
+                      <button onClick={() => removeFile(file.id)} className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 text-gray-600 transition-all">
+                        <Trash2 size={12} />
+                      </button>
                     </div>
-                    <button onClick={() => removeFile(file.id)} className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-500 text-gray-600 transition-all">
-                      <Trash2 size={12} />
-                    </button>
-                  </div>
-                );
-              })
+                  );
+                })}
+                <div className="mt-4 pt-2 border-t border-white/5">
+                  <button 
+                    onClick={clearWorkspace}
+                    className="w-full py-2.5 rounded-lg text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-red-400 hover:bg-red-500/10 transition-all flex items-center justify-center gap-2 group"
+                  >
+                    <Trash2 size={12} className="group-hover:animate-pulse" /> Clear All Tasks
+                  </button>
+                </div>
+              </>
             )}
           </div>
           
@@ -736,7 +740,7 @@ const MainApp: React.FC = () => {
                              <h3 className="text-xl font-bold">UI Registry Discovery</h3>
                              <p className="text-gray-500 max-w-xs mx-auto text-sm">Automatically identify React components and their prop signatures to build interactive playgrounds.</p>
                            </div>
-                           <button onClick={runAiDiscovery} className="bg-purple-500 text-white px-8 py-4 rounded-xl font-bold flex items-center gap-3 hover:scale-105 active:scale-95 transition-all shadow-xl shadow-purple-500/20"><Boxes size={20} /> Discover Components</button>
+                           <button onClick={runAiDiscovery} className="bg-purple-500 text-white shadow-lg shadow-purple-500/20 px-8 py-4 rounded-xl font-bold flex items-center gap-3 hover:scale-105 active:scale-95 transition-all"><Boxes size={20} /> Discover Components</button>
                          </div>
                        )}
                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -781,7 +785,7 @@ const App: React.FC = () => {
     }
   }), []);
 
-  return <RouterProvider router={router} />;
+  return <RouterProvider router={router} future={{ v7_startTransition: true }} />;
 };
 
 export default App;
