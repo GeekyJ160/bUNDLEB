@@ -1,3 +1,4 @@
+
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell } from 'recharts';
@@ -26,7 +27,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({ files }) => {
 
   // D3 Force Graph Effect
   useEffect(() => {
-    if (!files.length || !svgRef.current || containerWidth === 0) return;
+    if (!files.length || !svgRef.current || containerWidth <= 0) return;
 
     const width = containerWidth;
     const height = 400;
@@ -42,7 +43,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({ files }) => {
     // Data structure: Center node "Bundle", leaves are files
     const nodes = [
       { id: "Bundle", group: 1, size: 20 },
-      ...files.map(f => ({ id: f.name, group: 2, size: Math.max(5, Math.log(f.size) * 2) }))
+      ...files.map(f => ({ id: f.name, group: 2, size: Math.max(5, Math.log(f.size || 1) * 2) }))
     ];
 
     const links = files.map(f => ({ source: "Bundle", target: f.name }));
@@ -137,12 +138,12 @@ export const Visualizer: React.FC<VisualizerProps> = ({ files }) => {
     <div className="space-y-6">
       <div className="bg-dark-card border border-white/10 rounded-xl p-4 shadow-2xl">
         <h3 className="text-neon-cyan font-bold mb-4 flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-neon-cyan"></span>
+          <span className="w-2 h-2 rounded-full bg-neon-cyan animate-pulse"></span>
           Dependency Topology
         </h3>
-        <div ref={containerRef} className="w-full h-[400px] bg-dark-bg/50 rounded-lg overflow-hidden relative">
+        <div ref={containerRef} className="w-full h-[400px] bg-dark-bg/50 rounded-lg overflow-hidden relative border border-white/5 shadow-inner">
            {!files.length && (
-            <div className="absolute inset-0 flex items-center justify-center text-gray-500">
+            <div className="absolute inset-0 flex items-center justify-center text-gray-500 font-bold italic tracking-wider">
               No files to visualize
             </div>
           )}
@@ -152,17 +153,18 @@ export const Visualizer: React.FC<VisualizerProps> = ({ files }) => {
 
       <div className="bg-dark-card border border-white/10 rounded-xl p-4 shadow-2xl">
         <h3 className="text-neon-magenta font-bold mb-4 flex items-center gap-2">
-          <span className="w-2 h-2 rounded-full bg-neon-magenta"></span>
+          <span className="w-2 h-2 rounded-full bg-neon-magenta animate-pulse"></span>
           Size Distribution (Bytes)
         </h3>
-        <div className="w-full h-[300px]">
+        {/* Fix: Added min-width: 0 and explicit container relative positioning to fix Recharts width(-1) warning */}
+        <div className="w-full min-w-0 h-[300px] relative">
           {files.length > 0 ? (
-            <ResponsiveContainer width="100%" height="100%">
+            <ResponsiveContainer width="100%" height="100%" minHeight={300}>
               <BarChart data={chartData} layout="vertical" margin={{ top: 5, right: 30, left: 40, bottom: 5 }}>
-                <XAxis type="number" stroke="#6b7280" />
-                <YAxis dataKey="name" type="category" width={100} stroke="#6b7280" fontSize={12} />
+                <XAxis type="number" stroke="#6b7280" fontSize={10} />
+                <YAxis dataKey="name" type="category" width={100} stroke="#6b7280" fontSize={10} />
                 <Tooltip 
-                  contentStyle={{ backgroundColor: '#101320', borderColor: '#333', color: '#fff' }}
+                  contentStyle={{ backgroundColor: '#101320', border: '1px solid #333', borderRadius: '8px', color: '#fff' }}
                   cursor={{fill: 'rgba(255,255,255,0.05)'}}
                 />
                 <Bar dataKey="size" radius={[0, 4, 4, 0]}>
@@ -173,7 +175,7 @@ export const Visualizer: React.FC<VisualizerProps> = ({ files }) => {
               </BarChart>
             </ResponsiveContainer>
           ) : (
-            <div className="w-full h-full flex items-center justify-center text-gray-500">
+            <div className="w-full h-full flex items-center justify-center text-gray-500 font-bold italic tracking-wider">
               No data
             </div>
           )}
