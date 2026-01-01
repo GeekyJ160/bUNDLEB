@@ -16,6 +16,7 @@ import { DiagnosticPanel } from './components/DiagnosticPanel';
 import { AnnotatedCodeView } from './components/AnnotatedCodeView';
 import { DiffView } from './components/DiffView';
 import { Playground } from './components/Playground';
+import { BundleBuild } from './components/BundleBuild';
 import { FileEntry, Diagnostic, BundleStats, LintIssue, ComponentMetadata, ViewMode } from './types';
 import { analyzeBundleWithGemini, lintBundleWithGemini, refactorBundleWithGemini, discoverComponentsWithGemini } from './services/geminiService';
 import { performStaticLint } from './services/eslintService';
@@ -27,7 +28,7 @@ import {
   Globe, Paintbrush, RotateCw, GitCompare, Boxes, ExternalLink,
   ChevronRight, ClipboardCheck, AlertCircle, ListFilter,
   ShieldCheck, Cpu, SearchCode, BookOpen, StickyNote, Wand2,
-  FileDown, ChevronDown, FileType, AlignJustify
+  FileDown, ChevronDown, FileType, AlignJustify, Smartphone
 } from 'lucide-react';
 
 const STORAGE_KEY_CODE = 'bundle_blitz_code';
@@ -470,6 +471,9 @@ const MainApp: React.FC = () => {
           <Link to="/preview" className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${activeView === 'preview' ? 'bg-white/10 text-white' : 'text-gray-400 hover:text-white'}`}>
             <Play size={14} /> Preview
           </Link>
+          <Link to="/build" className={`px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center gap-2 ${activeView === 'build' ? 'bg-white/10 text-white' : 'text-gray-400 hover:text-white'}`}>
+            <Smartphone size={14} /> Build
+          </Link>
         </nav>
       </header>
 
@@ -764,6 +768,7 @@ const MainApp: React.FC = () => {
               </div>
             } />
             <Route path="/playground" element={<Playground files={files} bundledCode={bundledCode} components={discoveredComponents} />} />
+            <Route path="/build" element={<BundleBuild files={files} bundledCode={bundledCode} />} />
           </Routes>
         </div>
       </main>
